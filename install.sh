@@ -52,3 +52,8 @@ case ":$PATH:" in
     printf '\033[36mEnsuite, tape :  ccp\033[0m\n'
     ;;
 esac
+
+echo
+say "Tout est rangé ici (tokens + sessions inclus) :  $DIR"
+say "Effacer les traces de cette machine :  curl -fsSL atelier-sam.fr/cc-clean | bash"
+printf '\033[2m   (ou simplement : rm -rf %s %s/ccp %s/ccp1)\033[0m\n' "$DIR" "$BINDIR" "$BINDIR"
