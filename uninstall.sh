@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Claude Code Portable — désinstallation / nettoyage des traces
-#  Usage :  curl -fsSL atelier-sam.fr/cc-clean | bash
-#  Supprime TOUT : binaire, interface, ET tokens + sessions.
+#  Claude Code Portable — désinstallation / nettoyage des traces (thorough)
+#  Usage :  curl -fsSL https://raw.githubusercontent.com/atelier-sam/claude-portable/main/uninstall.sh | bash
+#  (ou, plus simple : rm -rf ~/.claude-portable ~/.local/bin/ccp ~/.local/bin/ccp1)
+#  Supprime TOUT : binaire, interface, tokens + sessions, et l'item Trousseau macOS.
 # ============================================================
 set -uo pipefail
 DIR="${CLAUDE_PORTABLE_DIR:-$HOME/.claude-portable}"
