@@ -16,14 +16,26 @@ printf "Confirmer ? [tape OUI] : "
 read -r ans
 [ "$ans" = "OUI" ] || { echo "Annulé."; exit 1; }
 
+# macOS : chaque profil du portable a SA session dans le Trousseau, sous
+# « Claude Code-credentials-<sha256(dossier config)[:8]> » (Claude suffixe le nom
+# du service dès que CLAUDE_CONFIG_DIR est défini). On ne supprime QUE ces
+# items-là, calculés depuis les dossiers de ce portable, AVANT d'effacer le
+# dossier. Surtout pas « Claude Code-credentials » sans suffixe : c'est la
+# session du Claude Code normal de la machine (~/.claude), pas la nôtre.
+if [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ]; then
+  if [ -x "$DIR/bin/ccp-core" ]; then
+    "$DIR/bin/ccp-core" --root "$DIR" accounts purge >/dev/null 2>&1 || true
+  fi
+  for d in "$DIR"/config/*/; do
+    [ -d "$d" ] || continue
+    cfg="${d%/}"
+    svc="Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)"
+    security delete-generic-password -s "$svc" >/dev/null 2>&1 && echo "  - Trousseau : $svc supprimé"
+  done
+fi
+
 rm -rf "$DIR"
 rm -f "$BINDIR/ccp" "$BINDIR/ccp1"
-
-# macOS : Claude peut aussi avoir mis un credential dans le Trousseau lors d'un
-# refresh. On tente de l'enlever (sans bloquer si absent).
-if [ "$(uname -s)" = "Darwin" ]; then
-  security delete-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 || true
-fi
 
 echo "✓ Désinstallé. Plus aucune trace de Claude Code Portable sur cette machine."
 echo "  (Pense à révoquer le token sur https://claude.ai si la machine n'est pas la tienne.)"
