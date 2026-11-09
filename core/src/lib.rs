@@ -18,6 +18,7 @@ pub mod oauth;
 pub mod plan;
 pub mod purge;
 pub mod recommend;
+pub mod remote;
 pub mod render;
 pub mod root;
 pub mod run;

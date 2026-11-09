@@ -56,17 +56,25 @@ pub struct UreqHttp {
 /// 1 Mo suffit largement (profil, usage, jetons) ; au-delà c'est un faux serveur.
 const MAX_BODY: u64 = 1 << 20;
 
+/// TLS commun à TOUS les clients de ccp-core (comptes, téléchargements d'outils,
+/// sonde Cloudflare) : racines du système, jamais un second réglage qui dérive.
+pub(crate) fn tls_config() -> ureq::tls::TlsConfig {
+    ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build()
+}
+
+pub(crate) fn user_agent() -> String {
+    format!("ccp-core/{}", env!("CARGO_PKG_VERSION"))
+}
+
 impl UreqHttp {
     pub fn new() -> UreqHttp {
         let cfg = ureq::Agent::config_builder()
             // Les 4xx/5xx sont des réponses à classer, pas des erreurs de transport.
             .http_status_as_error(false)
-            .user_agent(format!("ccp-core/{}", env!("CARGO_PKG_VERSION")))
-            .tls_config(
-                ureq::tls::TlsConfig::builder()
-                    .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                    .build(),
-            )
+            .user_agent(user_agent())
+            .tls_config(tls_config())
             .build();
         UreqHttp { agent: cfg.into() }
     }

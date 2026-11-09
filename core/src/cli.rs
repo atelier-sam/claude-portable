@@ -96,6 +96,11 @@ pub enum Cmd {
         #[command(subcommand)]
         action: crate::win::WinCmd,
     },
+    /// Liaison avec le Mac de Sam par le tunnel Cloudflare : connexion, partage de ce PC, installation côté Mac.
+    Remote {
+        #[command(subcommand)]
+        action: crate::remote::RemoteCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -377,6 +382,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Run { profile, args } => cmd_run(&env, &root, &profile, args),
         Cmd::Doctor { profile } => cmd_doctor(&env, &root, profile.as_deref()),
         Cmd::Win { action } => crate::win::run(&env, &root, action),
+        Cmd::Remote { action } => crate::remote::run(&env, &root, action),
     }
 }
 

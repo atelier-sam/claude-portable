@@ -37,6 +37,15 @@ pub struct Overrides {
     pub winget: Option<String>,
     /// `CCP_ODT_SETUP` : `setup.exe` de l'Office Deployment Tool déjà présent.
     pub odt_setup: Option<String>,
+    /// `CCP_SSH_BIN` : client ssh à la place de celui du système (tests).
+    pub ssh: Option<String>,
+    /// `CCP_DOWNLOAD_BASE` : serveur des téléchargements épinglés (cloudflared, OpenSSH),
+    /// bouclage HTTP seulement. Le SHA-256 épinglé reste exigé : un faux serveur ne passe pas.
+    pub download_base: Option<String>,
+    /// `CCP_ACCESS_URL` : adresse testée par `setup-mac` à la place du tunnel (bouclage seulement).
+    pub access_url: Option<String>,
+    /// `CCP_OPENSSH_DIR` : dossier d'un OpenSSH déjà présent (sshd, ssh-keygen) pour `remote share`.
+    pub openssh_dir: Option<PathBuf>,
 }
 
 pub fn now_ms() -> i64 {
@@ -121,6 +130,11 @@ impl Env {
                 fake_windows: nonempty("CCP_FAKE_WINDOWS").is_some_and(|v| v == "1"),
                 winget: nonempty("CCP_WINGET_BIN"),
                 odt_setup: nonempty("CCP_ODT_SETUP"),
+                ssh: nonempty("CCP_SSH_BIN"),
+                download_base: loopback_override("CCP_DOWNLOAD_BASE")
+                    .map(|u| u.trim_end_matches('/').to_string()),
+                access_url: loopback_override("CCP_ACCESS_URL"),
+                openssh_dir: nonempty("CCP_OPENSSH_DIR").map(PathBuf::from),
             },
         }
     }

@@ -159,7 +159,7 @@ fn spawn_with_fallback(env: &Env, root: &Root, p: &ProfileDir, opts: &RunOpts) -
 // ------------------------------------------------------------------ signaux
 
 #[cfg(unix)]
-mod sig {
+pub(crate) mod sig {
     use std::sync::atomic::{AtomicI32, Ordering};
 
     static CHILD: AtomicI32 = AtomicI32::new(0);
@@ -209,7 +209,7 @@ mod sig {
 }
 
 #[cfg(windows)]
-mod sig {
+pub(crate) mod sig {
     use windows_sys::core::BOOL;
     use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 
