@@ -320,7 +320,11 @@ tool_remote_share() {
 
 tool_remote_setup_mac() {
   title "CONFIGURER CE MAC COMME POSTE DISTANT"
-  ccp_core remote setup-mac
+  # Sortie du noyau : « ok|ko<TAB>contrôle<TAB>détail » ; rendu ✓ / ✗ lisible.
+  ccp_core remote setup-mac | awk -F'\t' -v g=$'\033[32m' -v r=$'\033[31m' -v d=$'\033[2m' -v z=$'\033[0m' '
+    $1=="ok" {printf "  %s✓%s %-20s %s%s%s\n", g, z, $2, d, $3, z; next}
+    $1=="ko" {printf "  %s✗%s %-20s %s\n", r, z, $2, $3; next}
+    {print "  " $0}'
   pause_key
 }
 
@@ -367,22 +371,26 @@ do_wipe() {
   sleep 2
 }
 
-# Sur un Mac qui n'est pas à Sam, les sessions du portable vivent dans le
-# Trousseau DE L'HÔTE : on les retire en partant. On demande une fois par machine.
+# Sur un ordinateur qui n'est pas à Sam (PC client), on retire en partant tout ce
+# qui permettrait de réutiliser ses comptes : sessions Claude (Trousseau de
+# l'hôte sur macOS, fichiers du portable ailleurs) et jetons Cloudflare Access
+# (ccp-core remote lit le même marqueur config/.hosts/<hôte>). Une question par machine.
 host_key() { hostname 2>/dev/null | tr -c 'a-zA-Z0-9_.-' '_' ; }
 host_trust() { cat "$ROOT/config/.hosts/$(host_key)" 2>/dev/null; }
 ask_host_trust() {
-  [ "$CC_OS" = darwin ] || return 0
   [ -n "$(host_trust)" ] && return 0
   mkdir -p "$ROOT/config/.hosts"
-  if gum confirm "Cet ordinateur ($(hostname)) est-il à toi ? (Non = les sessions sont retirées du Trousseau en quittant)" --affirmative "Oui, à moi" --negative "Non" --selected.background "$ORANGE"; then
+  if gum confirm "Cet ordinateur ($(hostname)) est-il à toi ? (Non = tes connexions sont effacées en quittant)" --affirmative "Oui, à moi" --negative "Non" --selected.background "$ORANGE"; then
     echo trusted > "$ROOT/config/.hosts/$(host_key)"
   else echo guest > "$ROOT/config/.hosts/$(host_key)"; fi
 }
 
 quit_wizard() {
   clear 2>/dev/null || true
-  if [ "$(host_trust)" = guest ]; then cc_purge_keychain; note "Sessions retirées du Trousseau de cet ordinateur."; fi
+  if [ "$(host_trust)" = guest ]; then
+    if [ -n "${CORE:-}" ]; then ccp_core accounts purge >/dev/null 2>&1 || true; else cc_purge_keychain; fi
+    note "Connexions Claude effacées de cet ordinateur (il faudra te reconnecter la prochaine fois)."
+  fi
   gum style --foreground "$ORANGE" --bold --margin "1 0 1 2" "À bientôt 👋"
   if [ "$CC_OS" = win32 ]; then exit 0; else exec "${SHELL:-/bin/zsh}" -l; fi
 }

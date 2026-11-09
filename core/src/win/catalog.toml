@@ -54,7 +54,7 @@ default = false
 
 [[app]]
 key = "winrar"
-label = "WinRAR (archives, licence payante)"
+label = "WinRAR (archives — licence payante)"
 category = "Utilitaires"
 winget = "RARLab.WinRAR"
 default = false

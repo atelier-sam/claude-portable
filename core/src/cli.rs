@@ -111,7 +111,7 @@ pub enum AccountsCmd {
     Best,
     /// Inventaire en lecture seule des logins Claude de cet ordinateur.
     Discover(DiscoverArgs),
-    /// Retire du Trousseau les sessions de CE portable (jamais celle de la machine).
+    /// Efface les sessions de CE portable : Trousseau (macOS) et identifiants en fichier (jamais la session de la machine).
     Purge {
         /// Un seul profil (sinon tous).
         profile: Option<String>,
