@@ -388,8 +388,19 @@ ask_host_trust() {
 quit_wizard() {
   clear 2>/dev/null || true
   if [ "$(host_trust)" = guest ]; then
-    if cc_purge_sessions; then note "Connexions Claude effacées de cet ordinateur (il faudra te reconnecter la prochaine fois)."
-    else bad "Effacement INCOMPLET des connexions : supprime à la main le dossier $ROOT/config avant de partir."; fi
+    local prc=0; cc_purge_sessions || prc=$?
+    if [ "$prc" = 2 ]; then
+      # Une session Claude encore ouverte peut réécrire ses identifiants : on
+      # laisse la fermer, puis on efface une 2e fois avant de rien promettre.
+      bad "Une session Claude est encore ouverte sur cet ordinateur : ferme-la (sinon elle peut réenregistrer ta connexion)."
+      gum confirm "C'est fermé ? On efface à nouveau." --affirmative "Effacer" --negative "Plus tard" --selected.background "$ORANGE" \
+        && { prc=0; cc_purge_sessions || prc=$?; }
+    fi
+    case "$prc" in
+      0) note "Connexions Claude effacées de cet ordinateur (il faudra te reconnecter la prochaine fois)." ;;
+      2) bad "Effacement fait, mais une session Claude restait ouverte : ferme-la et relance ccp → Quitter pour garantir l'effacement." ;;
+      *) bad "Effacement INCOMPLET des connexions : supprime à la main le dossier $ROOT/config avant de partir." ;;
+    esac
   fi
   gum style --foreground "$ORANGE" --bold --margin "1 0 1 2" "À bientôt 👋"
   if [ "$CC_OS" = win32 ]; then exit 0; else exec "${SHELL:-/bin/zsh}" -l; fi

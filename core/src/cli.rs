@@ -356,7 +356,10 @@ fn cmd_purge(env: &Env, root: &Root, profile: Option<&str>) -> Result<i32> {
     }
     out(&text)?;
     if r.complete() {
-        Ok(0)
+        // 11 = tout est effacé, mais sans garantie qu'un processus encore vivant
+        // (session ouverte, renouvellement bloqué, volume sans verrou) ne réécrive
+        // des identifiants : le wizard ne doit pas annoncer « effacé » sans réserve.
+        Ok(if r.at_risk() { 11 } else { 0 })
     } else {
         Err(CcpError::Internal(format!(
             "purge INCOMPLÈTE : {} élément(s) n'ont pas pu être effacés, des identifiants peuvent subsister (détail ci-dessus)",

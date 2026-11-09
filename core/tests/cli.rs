@@ -1416,7 +1416,8 @@ fn purge_erases_every_secret_and_says_so_when_a_claude_session_is_open() {
     held.try_lock().expect("verrou de test");
 
     let o = sb.run(None, &["accounts", "purge"]);
-    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    // 11 : tout est effacé, mais une session vivante pourrait réécrire.
+    assert_eq!(code(&o), 11, "{}", stderr(&o));
     let out = stdout(&o);
     assert!(out.contains("Attention") && out.contains("client"), "{out}");
     assert!(out.contains("ouvert"), "{out}");

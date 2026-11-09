@@ -80,7 +80,10 @@ multiplicateur (x20 = 20, x5 = 5, Pro = 1), seuil 95 %.
 
 Le marqueur `config/.hosts/<hôte>` (`trusted` | `guest`) est demandé à la 1re
 ouverture sur tout système. En quittant un poste `guest` : `accounts purge`
-(Trousseau + identifiants en fichier, journal et sauvegardes) ; `remote` purge
+(Trousseau + identifiants en fichier, journal, réservation, sauvegardes,
+temporaires) sous le verrou du profil. Codes : 0 = effacé ; 11 = effacé mais une
+session ou un renouvellement encore vivant pourrait réécrire (le wizard demande
+de la fermer et efface une 2e fois) ; 10 = échec, fichiers nommés. `remote` purge
 aussi les jetons Cloudflare Access de cet hôte.
 
 ## exFAT, noexec

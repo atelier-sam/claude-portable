@@ -48,6 +48,11 @@ impl PurgeReport {
     pub fn complete(&self) -> bool {
         self.failures.is_empty()
     }
+    /// Effacement fait sans le verrou du profil : un processus vivant peut encore
+    /// réécrire des identifiants (code de sortie 11 de `accounts purge`).
+    pub fn at_risk(&self) -> bool {
+        !self.session_open.is_empty() || !self.renewal_running.is_empty() || !self.unlocked.is_empty()
+    }
 }
 
 pub fn purge(env: &Env, root: &Root, only: Option<&Profile>) -> Result<PurgeReport> {
@@ -193,6 +198,14 @@ mod tests {
         assert!(!d.join("oauth.token").exists());
         assert!(d.join("settings.json").exists(), "les réglages restent");
         assert_eq!(purge(&env, &root, None).unwrap().removed, 0);
+    }
+
+    #[test]
+    fn a_purge_without_the_lock_is_complete_but_at_risk() {
+        let mut r = PurgeReport::default();
+        assert!(r.complete() && !r.at_risk());
+        r.session_open.push("client".into());
+        assert!(r.complete() && r.at_risk());
     }
 
     #[test]

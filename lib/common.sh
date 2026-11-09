@@ -299,8 +299,14 @@ cc_update() {
     cc_info "MAJ $plat ..."
     if curl -fsSL "$CC_RELEASES/$ver/$plat/$binname" -o "$tmp" && cc_check_sha "$tmp" "$sha"; then
       [ -f "$dst" ] && mv -f "$dst" "$dst.prev" && printf '%s' "${old:-?}" > "$ROOT/bin/$plat/.prev-version"
-      mv -f "$tmp" "$dst"; chmod +x "$dst" 2>/dev/null || true; cc_ok "$plat à jour ($ver)"
-      [ "$plat" = "$PLAT" ] && here_ok=1
+      if mv -f "$tmp" "$dst"; then
+        chmod +x "$dst" 2>/dev/null || true; cc_ok "$plat à jour ($ver)"
+        [ "$plat" = "$PLAT" ] && here_ok=1
+      else
+        # Remise en place de l'ancien binaire : jamais de plateforme sans claude.
+        [ -f "$dst.prev" ] && [ ! -f "$dst" ] && mv -f "$dst.prev" "$dst"
+        rm -f "$tmp"; cc_warn "$plat : installation impossible, ancienne version conservée."
+      fi
     else rm -f "$tmp"; cc_warn "$plat : échec ou empreinte invalide, ancienne version conservée."; fi
   done
   # VERSION décrit le binaire de CETTE plateforme : on ne l'avance que s'il a
@@ -351,15 +357,22 @@ cc_update_portable() {
 # en fichier (seul magasin sous Windows/Linux). Passe par le noyau ; le repli
 # bash couvre le cas « noyau absent », sinon un poste invité garderait tout.
 # Rend 0 seulement si tout ce qui existait a été effacé.
+# Code retour : 0 = tout effacé ; 2 = effacé mais une session ou un renouvellement
+# encore vivant pourrait réécrire des identifiants (code 11 du noyau) ; 1 = échec.
 cc_purge_sessions() {
-  ccp_core accounts purge >/dev/null 2>&1 && return 0
+  local core_rc=0
+  ccp_core accounts purge >/dev/null 2>&1 || core_rc=$?
+  case "$core_rc" in 0) return 0 ;; 11) return 2 ;; esac
   local d cfg f rc=0
   for d in "$ROOT"/config/*/; do
     [ -d "$d" ] || continue; cfg="${d%/}"
     if [ "${CC_OS:-}" = darwin ]; then
       security delete-generic-password -s "Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)" >/dev/null 2>&1 || true
     fi
-    for f in .credentials.json oauth.token oauth.token.bak .ccp-pending; do
+    # Même liste que core/src/purge.rs : journal, sa réservation (peut contenir
+    # des jetons neufs) et les temporaires d'écriture atomique.
+    for f in .credentials.json oauth.token oauth.token.bak .ccp-pending .ccp-pending.reserve "$cfg"/.ccp-tmp-*; do
+      f="${f#"$cfg"/}"
       [ -e "$cfg/$f" ] || continue
       rm -f "$cfg/$f" 2>/dev/null || rc=1
       [ -e "$cfg/$f" ] && rc=1
