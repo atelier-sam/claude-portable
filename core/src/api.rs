@@ -161,6 +161,22 @@ pub fn classify_usage(status: u16, body: &str) -> Fetch<UsageInfo> {
     })
 }
 
+/// Code d'erreur d'une réponse du point de jeton, quelle que soit l'enveloppe.
+fn refresh_error_code(body: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return String::new();
+    };
+    match v.get("error") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Object(o)) => o
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
 pub fn classify_refresh(status: u16, body: &str) -> RefreshResult {
     match status {
         200 => {
@@ -193,22 +209,19 @@ pub fn classify_refresh(status: u16, body: &str) -> RefreshResult {
             }
         }
         400 | 401 => {
-            let code = serde_json::from_str::<Value>(body)
-                .ok()
-                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
-                .unwrap_or_default();
-            // Une requête mal formée de NOTRE part ne doit pas condamner un login
-            // valide : seules les réponses « jeton mort » (ou muettes) révoquent.
-            const OURS: [&str; 4] = [
-                "invalid_request",
-                "invalid_client",
-                "unsupported_grant_type",
-                "invalid_scope",
-            ];
-            if status == 400 && OURS.contains(&code.as_str()) {
-                RefreshResult::Rejected(format!("renouvellement refusé ({code})"))
+            // MÊME règle que le Claude officiel (lue dans son binaire 2.1.319) : seul
+            // `invalid_grant` en 400/401 condamne le refresh token. Le code est soit
+            // `{"error":"invalid_grant"}` (OAuth), soit `{"error":{"type":"invalid_grant"}}`
+            // (enveloppe Anthropic). Tout le reste (requête mal formée de NOTRE part,
+            // format de jeton refusé, réponse muette…) n'est PAS une preuve de mort :
+            // marquer « révoqué » sur un doute ferait perdre un compte vivant.
+            let code = refresh_error_code(body);
+            if code == "invalid_grant" {
+                RefreshResult::Revoked(format!("renouvellement refusé : {code}"))
+            } else if code.is_empty() {
+                RefreshResult::Rejected(format!("renouvellement refusé (HTTP {status})"))
             } else {
-                RefreshResult::Revoked(format!("renouvellement refusé (HTTP {status})"))
+                RefreshResult::Rejected(format!("renouvellement refusé (HTTP {status}, {code})"))
             }
         }
         429 => RefreshResult::Transient("renouvellement : trop de requêtes (429)".into()),
@@ -404,29 +417,38 @@ mod tests {
     }
 
     #[test]
-    fn refresh_dead_token_revokes_but_our_bugs_do_not() {
+    fn only_invalid_grant_revokes_like_the_official_client() {
+        // les deux enveloppes d'erreur
+        for body in [
+            r#"{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}"#,
+            r#"{"error":{"type":"invalid_grant","message":"x"}}"#,
+        ] {
+            assert!(
+                matches!(classify_refresh(400, body), RefreshResult::Revoked(_)),
+                "{body}"
+            );
+            assert!(
+                matches!(classify_refresh(401, body), RefreshResult::Revoked(_)),
+                "{body}"
+            );
+        }
+        // tout le reste est un refus qui ne condamne pas le login
+        for (st, body) in [
+            (400, ""),
+            (401, "{}"),
+            (400, r#"{"error":"invalid_client"}"#),
+            (400, r#"{"error":"invalid_request"}"#),
+            (400, r#"{"error":"invalid_scope"}"#),
+            (400, r#"{"error":{"type":"invalid_request_error"}}"#),
+            (401, r#"{"error":{"type":"authentication_error"}}"#),
+        ] {
+            assert!(
+                matches!(classify_refresh(st, body), RefreshResult::Rejected(_)),
+                "{st} {body}"
+            );
+        }
         assert!(matches!(
-            classify_refresh(400, r#"{"error":"invalid_grant"}"#),
-            RefreshResult::Revoked(_)
-        ));
-        assert!(matches!(
-            classify_refresh(400, ""),
-            RefreshResult::Revoked(_)
-        ));
-        assert!(matches!(
-            classify_refresh(401, "{}"),
-            RefreshResult::Revoked(_)
-        ));
-        assert!(matches!(
-            classify_refresh(400, r#"{"error":"invalid_client"}"#),
-            RefreshResult::Rejected(_)
-        ));
-        assert!(matches!(
-            classify_refresh(400, r#"{"error":"invalid_request"}"#),
-            RefreshResult::Rejected(_)
-        ));
-        assert!(matches!(
-            classify_refresh(429, ""),
+            classify_refresh(429, r#"{"error":{"type":"rate_limit_error"}}"#),
             RefreshResult::Transient(_)
         ));
         assert!(matches!(

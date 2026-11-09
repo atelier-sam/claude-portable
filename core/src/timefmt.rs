@@ -45,6 +45,13 @@ pub fn day(epoch: i64, tz: &TimeZone) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
+/// « 04/12/2026 » : date seule, pour les fins de validité.
+pub fn date(epoch: i64, tz: &TimeZone) -> String {
+    zoned(epoch, tz)
+        .map(|z| format!("{:02}/{:02}/{:04}", z.day(), z.month(), z.year()))
+        .unwrap_or_else(|| "?".into())
+}
+
 /// « 2026-11-09 18:00 » pour le diagnostic.
 pub fn full(epoch: i64, tz: &TimeZone) -> String {
     zoned(epoch, tz)

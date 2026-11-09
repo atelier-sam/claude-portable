@@ -188,6 +188,19 @@ impl Drop for Critical<'_> {
     }
 }
 
+/// POINT D'INJECTION DE PANNE (tests uniquement). Si `var` contient un chemin,
+/// y pose un fichier puis s'endort : le test sait que le journal est écrit, que
+/// le magasin ne l'est PAS encore, et tue le processus à cet instant précis.
+/// Sans la variable (production) c'est un `if` sans effet.
+fn fault_point(var: &str) {
+    if let Some(path) = std::env::var_os(var) {
+        let _ = std::fs::write(path, b"arret");
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
+}
+
 /// Renouvelle le login de `p`. `seen` est le login tel que la sonde l'a lu
 /// (pour reconnaître qu'un autre processus a déjà fait le travail).
 pub fn renew(
@@ -267,6 +280,7 @@ pub fn renew(
             if let Err(e) = wrote {
                 return Renewal::Failed(format!("journal de renouvellement impossible : {e}"));
             }
+            fault_point("CCP_FAULT_AFTER_JOURNAL");
             // 4. Relecture juste avant écriture.
             let latest = match read_login(env, p) {
                 Ok(Some(l)) => l,

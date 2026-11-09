@@ -565,20 +565,18 @@ fn network_probe(d: &Deps, view: &View, now_s: i64) -> Outcome {
             }
             Ok(Fetch::Forbidden) => forbidden = true,
             Ok(Fetch::RateLimited) => {
-                // 429 = limite par IP du point de statut, PAS épuisement : on garde
-                // les dernières valeurs ; sans valeur connue, état neutre.
+                // 429 = limite par IP du point de statut, PAS épuisement du compte :
+                // l'état reste `rate_limited` (le wizard sait que le chiffre est vieux,
+                // `stale` est vrai) mais on garde les dernières bonnes valeurs. Seule
+                // une fenêtre déjà pleine et non encore reprise reste « limité ».
                 detail =
                     Some("limite du point de statut (429) : dernières valeurs conservées".into());
-                match view.cache.as_ref().and_then(|c| c.usage.as_ref()) {
-                    Some(old) => {
-                        let (o, _) = decay(old, now_s);
-                        state = if is_limited(&o.five_hour, &o.seven_day) {
-                            State::Limited
-                        } else {
-                            State::Ok
-                        };
+                state = State::RateLimited;
+                if let Some(old) = view.cache.as_ref().and_then(|c| c.usage.as_ref()) {
+                    let (o, _) = decay(old, now_s);
+                    if is_limited(&o.five_hour, &o.seven_day) {
+                        state = State::Limited;
                     }
-                    None => state = State::RateLimited,
                 }
             }
             Ok(Fetch::Unreachable(m)) => return Outcome::fail(State::Unreachable, m, &run.fp),
@@ -938,7 +936,9 @@ mod tests {
         );
         probe_profile(&f.d, &f.p, false, &opts());
         let st = fin(probe_profile(&f.d, &f.p, false, &opts()));
-        assert_eq!(st.state, State::Ok, "429 n'est jamais « épuisé »");
+        assert_eq!(st.state, State::RateLimited, "429 n'est jamais « épuisé »");
+        assert!(st.stale, "le chiffre affiché est vieux");
+        assert!(st.usable);
         assert_eq!(st.five_hour.unwrap().pct, 12);
         assert!(st.detail.unwrap().contains("429"));
     }

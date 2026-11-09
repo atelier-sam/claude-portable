@@ -34,6 +34,35 @@ pub fn now_s() -> i64 {
     now_ms() / 1000
 }
 
+/// Surcharge d'URL réservée aux tests : acceptée SEULEMENT vers le bouclage.
+/// Pourquoi : `CCP_TOKEN_URL` reçoit un refresh token. Une variable d'environnement
+/// hostile ne doit pas pouvoir l'envoyer ailleurs que sur la machine elle-même.
+fn loopback_override(name: &str) -> Option<String> {
+    let v = nonempty(name)?;
+    if is_loopback_http(&v) {
+        Some(v)
+    } else {
+        eprintln!(
+            "ccp-core : {name} ignorée (seul http://127.0.0.1 ou http://localhost est accepté)"
+        );
+        None
+    }
+}
+
+pub fn is_loopback_http(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    let name = if let Some(v6) = host.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        host.split(':').next().unwrap_or("")
+    };
+    matches!(name, "127.0.0.1" | "localhost" | "::1") && !host.contains('@')
+}
+
 fn nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
@@ -59,11 +88,12 @@ impl Env {
             .or_else(whoami_fallback)
             .unwrap_or_else(|| "user".to_string());
         Env {
-            api_base: nonempty("CCP_API_BASE")
+            api_base: loopback_override("CCP_API_BASE")
                 .unwrap_or_else(|| DEFAULT_API_BASE.to_string())
                 .trim_end_matches('/')
                 .to_string(),
-            token_url: nonempty("CCP_TOKEN_URL").unwrap_or_else(|| DEFAULT_TOKEN_URL.to_string()),
+            token_url: loopback_override("CCP_TOKEN_URL")
+                .unwrap_or_else(|| DEFAULT_TOKEN_URL.to_string()),
             keychain: nonempty("CCP_KEYCHAIN").map(PathBuf::from),
             no_keychain: nonempty("CCP_NO_KEYCHAIN").is_some_and(|v| v == "1"),
             home,
@@ -102,5 +132,22 @@ impl Env {
             user: "testeur".into(),
             claude: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_loopback_http_overrides_are_accepted() {
+        assert!(is_loopback_http("http://127.0.0.1:8080/token"));
+        assert!(is_loopback_http("http://localhost:1234"));
+        assert!(is_loopback_http("http://[::1]:9/x"));
+        assert!(!is_loopback_http("https://127.0.0.1/token"));
+        assert!(!is_loopback_http("http://evil.example/token"));
+        assert!(!is_loopback_http("http://127.0.0.1@evil.example/token"));
+        assert!(!is_loopback_http("http://127.0.0.1.evil.example/"));
+        assert!(!is_loopback_http("ftp://localhost"));
     }
 }

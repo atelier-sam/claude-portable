@@ -28,6 +28,14 @@ pub fn service_name(cfg: &str) -> String {
     format!("{SERVICE_BASE}-{}", hex_encode(&digest[..4]))
 }
 
+/// Vrai pour `Claude Code-credentials-<8 hex>` : un profil à `CLAUDE_CONFIG_DIR`.
+/// Faux pour le service nu (la session de la machine) et pour tout autre nom.
+pub fn is_portable_service(svc: &str) -> bool {
+    svc.strip_prefix(SERVICE_BASE)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|h| h.len() == 8 && h.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 #[derive(Debug)]
 pub enum KcError {
     /// Trousseau verrouillé / interaction refusée / autorisation en attente.
@@ -231,6 +239,13 @@ mod mac {
     /// Supprime tous les items du service (un appel de `security` en retire un).
     /// Renvoie le nombre supprimé.
     pub fn delete_all(env: &Env, svc: &str) -> Result<usize, KcError> {
+        // Garde-fou ABSOLU : le service SANS suffixe est la session de la machine
+        // (Claude Code normal de Sam). On ne supprime que des services suffixés.
+        if !is_portable_service(svc) {
+            return Err(KcError::Failed(
+                "refus de supprimer un service qui n'est pas celui d'un profil portable".into(),
+            ));
+        }
         let mut n = 0;
         for _ in 0..8 {
             let mut c = base(env, &["delete-generic-password", "-s", svc]);
@@ -249,6 +264,16 @@ mod mac {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_suffixed_services_are_portable() {
+        assert!(is_portable_service("Claude Code-credentials-72588510"));
+        assert!(!is_portable_service("Claude Code-credentials"));
+        assert!(!is_portable_service("Claude Code-credentials-"));
+        assert!(!is_portable_service("Claude Code-credentials-zzzzzzzz"));
+        assert!(!is_portable_service("Claude Code-credentials-725885100"));
+        assert!(!is_portable_service("autre-72588510"));
+    }
 
     #[test]
     fn real_vector_sora() {

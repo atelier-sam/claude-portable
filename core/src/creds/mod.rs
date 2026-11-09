@@ -18,6 +18,7 @@ use crate::util::fingerprint;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::path::Path;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -79,6 +80,13 @@ impl CredBlob {
 
     pub fn expires_at_ms(&self) -> Option<i64> {
         let n = self.oauth()?.get("expiresAt")?;
+        n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))
+    }
+
+    /// Fin de vie du refresh token, écrite par les Claude récents seulement
+    /// (`refreshTokenExpiresAt`). Absente des anciens items : `None` = inconnu.
+    pub fn refresh_expires_at_ms(&self) -> Option<i64> {
+        let n = self.oauth()?.get("refreshTokenExpiresAt")?;
         n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))
     }
 
@@ -156,9 +164,8 @@ impl std::fmt::Display for StoreError {
     }
 }
 
-fn read_file_store(p: &ProfileDir) -> Result<Option<Loaded>, StoreError> {
-    let path = p.credentials_file();
-    let text = match std::fs::read_to_string(&path) {
+fn read_file_store_at(path: &Path) -> Result<Option<Loaded>, StoreError> {
+    let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
@@ -180,10 +187,20 @@ fn read_file_store(p: &ProfileDir) -> Result<Option<Loaded>, StoreError> {
 /// Lit le login du profil : Trousseau d'abord sous macOS, puis le fichier
 /// (repli que Claude utilise lui-même quand le Trousseau est inutilisable).
 pub fn read_login(env: &Env, p: &ProfileDir) -> Result<Option<Loaded>, StoreError> {
+    read_login_at(env, &keychain::service_name(&p.cfg), &p.credentials_file())
+}
+
+/// Lecture générique d'un emplacement : `service` est le nom Trousseau EXACT
+/// (le login de la machine, `~/.claude`, n'a PAS de suffixe). Sert à `discover`,
+/// qui lit sans jamais écrire.
+pub fn read_login_at(
+    env: &Env,
+    service: &str,
+    credentials_file: &Path,
+) -> Result<Option<Loaded>, StoreError> {
     #[cfg(target_os = "macos")]
     if !env.no_keychain {
-        let svc = keychain::service_name(&p.cfg);
-        match keychain::find(env, &svc) {
+        match keychain::find(env, service) {
             Ok(Some(item)) => {
                 let blob = CredBlob::parse(&item.secret).map_err(|m| {
                     StoreError::Corrupt(format!("item du Trousseau illisible ({m})"))
@@ -192,7 +209,7 @@ pub fn read_login(env: &Env, p: &ProfileDir) -> Result<Option<Loaded>, StoreErro
                     kind: StoreKind::Keychain,
                     blob,
                     acct: Some(item.acct),
-                    service: Some(svc),
+                    service: Some(service.to_string()),
                 }));
             }
             Ok(None) => {}
@@ -201,8 +218,8 @@ pub fn read_login(env: &Env, p: &ProfileDir) -> Result<Option<Loaded>, StoreErro
         }
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = env;
-    read_file_store(p)
+    let _ = (env, service);
+    read_file_store_at(credentials_file)
 }
 
 /// Réécrit `blob` dans le magasin d'où `from` a été lu.
