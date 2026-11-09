@@ -84,7 +84,17 @@ fn read_manifest(dir: &Path) -> Option<Manifest> {
 }
 
 /// Le binaire installé est-il celui que l'épingle actuelle désigne, et intact ?
+///
+/// Binaire brut (Windows, Linux) : comparé DIRECTEMENT à l'empreinte épinglée
+/// compilée dans ccp-core, jamais au manifeste — celui-ci est un fichier du
+/// portable qu'un tiers peut réécrire avec le binaire (revue terminale : `remote
+/// share` lance cloudflared en administrateur). Archive (macOS) : le binaire
+/// extrait n'a pas d'empreinte publiée ; le manifeste suffit, ce chemin n'est
+/// jamais élevé.
 fn is_current(dir: &Path, exe: &Path, asset: &Asset) -> bool {
+    if matches!(asset.packaging, Packaging::Raw) {
+        return sha256_file(exe).is_ok_and(|h| h.eq_ignore_ascii_case(asset.sha256));
+    }
     let Some(m) = read_manifest(dir) else {
         return false;
     };
@@ -325,6 +335,34 @@ mod tests {
         ensure(&dir, "cloudflared", &asset, base, &f, &mut |_| {}).unwrap();
         assert_eq!(fs::read(&a.exe).unwrap(), b"binaire");
         assert_eq!(f.calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_swapped_binary_with_a_forged_manifest_is_still_refused() {
+        // Scénario de la revue : un tiers remplace cloudflared ET réécrit le
+        // manifeste pour qu'il décrive son binaire. Un binaire brut se compare à
+        // l'épingle compilée, donc il est retéléchargé quand même.
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("c");
+        let (asset, url) = raw_asset("9.9.9", b"binaire");
+        let mut f = FakeFetch::default();
+        f.files.insert(url, b"binaire".to_vec());
+        let base = "http://127.0.0.1:1";
+        let a = ensure(&dir, "cloudflared", &asset, base, &f, &mut |_| {}).unwrap();
+        fs::write(&a.exe, b"binaire piege").unwrap();
+        let forged = Manifest {
+            version: asset.tag.into(),
+            source_sha256: asset.sha256.into(),
+            binary_sha256: sha_of(b"binaire piege"),
+        };
+        fs::write(dir.join(MANIFEST), forged.render()).unwrap();
+        ensure(&dir, "cloudflared", &asset, base, &f, &mut |_| {}).unwrap();
+        assert_eq!(fs::read(&a.exe).unwrap(), b"binaire");
+        assert_eq!(
+            f.calls.lock().unwrap().len(),
+            2,
+            "retéléchargé malgré le manifeste"
+        );
     }
 
     #[test]
