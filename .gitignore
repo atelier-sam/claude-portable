@@ -18,3 +18,7 @@ VERSION
 .DS_Store
 ._*
 Thumbs.db
+
+# Noyau Rust (ccp-core) : artefacts de compilation
+core/target/
+dist/
