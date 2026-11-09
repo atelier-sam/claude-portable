@@ -1,11 +1,13 @@
 # Claude Code Portable
 
 Claude Code officiel (binaire natif Anthropic) dans un **wizard de terminal** :
-menu fléché, comptes multiples, statut connecté, **email + quota 5h/7j**, mode
-`bypass permissions`. Fonctionne **sans installation** (depuis une clé USB) **ou**
-en local via une commande courte. Windows · macOS · Linux.
+plusieurs comptes, **statut réel, forfait et quota 5 h / 7 j de chaque compte dès
+l'accueil**, lancement du compte qui a le plus de marge, mode `bypass permissions`.
+Plus des **outils d'atelier** : installation de logiciels Windows à cocher
+(Office par version, LibreOffice, Chrome, Firefox, WinRAR…) et accès à tes agents
+du Mac depuis le PC d'un client. Windows · macOS · Linux.
 
-## Installer (sans clé, en local)
+## Installer
 
 **macOS / Linux**
 ```sh
@@ -17,38 +19,44 @@ curl -fsSL atelier-sam.fr/cc | bash
 irm atelier-sam.fr/cc.ps1 | iex
 ```
 
-Puis, partout :
-```sh
-ccp        # lance le wizard (compte actif)
-ccp1       # 2e compte
-```
+Puis : `ccp` (wizard) — `ccp1` (2e compte).
 
-L'installeur télécharge le binaire `claude` officiel + l'interface `gum`
-(+ Git portable sous Windows) dans `~/.claude-portable`, et pose la commande `ccp`.
+Tout vient de la **dernière release signée** du dépôt : `SHA256SUMS` est signé
+(`ssh-keygen -Y`, clé `ccp-release`), chaque fichier est vérifié avant d'être posé,
+le binaire Claude est vérifié contre le manifest officiel d'Anthropic, `gum`,
+Git portable et `cloudflared` contre des empreintes épinglées. Une seule
+vérification ratée **arrête** l'installation.
 
 ## Ce que fait le wizard
 
-- Lancer / choisir un compte, en **ajouter** un (connexion navigateur ou import
-  du compte de la machine), définir le compte par défaut.
-- **Tableau** par compte : email, plan (Max/Pro), **quota 5h / 7 jours**, sessions.
-- Mode `bypass permissions` activé par défaut.
-- Mise à jour, effacement (kill switch).
+- **Accueil** : un tableau par compte — email, forfait (Max x20 / x5 / Pro),
+  quota 5 h et 7 jours, reprise, état (`valide`, `expiré`, `à reconnecter`,
+  `limité`…). Les jetons expirés sont renouvelés seuls quand c'est possible.
+- **Réindexer mes comptes** : retrouve les logins Claude déjà présents sur
+  l'ordinateur et les reconnecte proprement dans le portable (une connexion
+  navigateur par compte ; on ne copie jamais d'identifiants, une copie se fait
+  révoquer). L'email connecté est vérifié.
+- **Lancer le compte recommandé** (marge restante × forfait) ou un autre ; un
+  compte déjà ouvert ailleurs n'est pas relancé.
+- **Outils** — Windows : logiciels à cocher (winget, silencieux), Microsoft Office
+  au choix (365, LTSC 2024/2021, Famille…) en français, sans clé (« non activé ») ;
+  partager ce PC avec mes agents du Mac (temporaire). Partout : parler à mes agents
+  du Mac (tunnel Cloudflare + code e-mail, puis mot de passe du Mac — rien
+  d'installé sur le PC). macOS : vérifier ce Mac comme poste distant.
+- **Mise à jour** de Claude (stable / dernière) avec retour arrière, et du portable.
+- **Poste invité** : à la 1re ouverture, « cet ordinateur est-il à toi ? » ; si non,
+  toutes les connexions sont effacées en quittant.
 
 ## Sécurité
 
-**Aucun secret dans ce dépôt.** Les tokens d'authentification vivent uniquement
-en local dans `~/.claude-portable/config/<compte>/` (jamais commités — voir
-`.gitignore`). L'installeur est lisible : tu peux l'auditer avant de l'exécuter.
-
-Quota & email sont lus via les endpoints OAuth officiels (`/api/oauth/profile`,
-`/api/oauth/usage`) avec le token du compte connecté, comme `claude --status`.
+Aucun secret dans ce dépôt ni dans les releases. Les sessions vivent sur la
+machine : Trousseau macOS (un item par profil, jamais celui de ton Claude Code
+normal) ou `~/.claude-portable/config/<compte>/` ailleurs. Quota et forfait sont
+lus via les endpoints OAuth officiels avec le jeton du compte.
 
 ## Détails techniques
 
-Voir [`TECHNICAL.md`](./TECHNICAL.md). Cœur partagé : `lib/common.sh` (détection
-plateforme, téléchargement+vérif SHA256 du binaire, gum, quota). Wizard :
-`Claude.command` (Mac/Linux, et Windows via le bash de Git portable). Lanceurs
-Windows : `claude.cmd` (wizard) et `claude-classic.cmd` (repli 100 % batch).
+Voir [`TECHNICAL.md`](./TECHNICAL.md).
 
 ---
 *L'Atelier de Sam — usage perso/atelier.*

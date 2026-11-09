@@ -12,7 +12,8 @@
 # ============================================================
 set -euo pipefail
 
-CCP_DL="https://github.com/atelier-sam/claude-portable/releases/latest/download"
+# Surchargeable pour une recette locale : sans danger, la signature (clé ci-dessous) reste exigée.
+CCP_DL="${CCP_DL:-https://github.com/atelier-sam/claude-portable/releases/latest/download}"
 CCP_SIGNER='ccp-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINJP7f3uFSVRqxu997bLbJsDB+J8kerqZglqh5OH3PCS'
 DIR="${CLAUDE_PORTABLE_DIR:-$HOME/.claude-portable}"
 BINDIR="$HOME/.local/bin"

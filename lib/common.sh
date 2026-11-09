@@ -16,7 +16,7 @@
 
 CC_RELEASES="https://downloads.claude.ai/claude-code-releases"
 CCP_REPO="atelier-sam/claude-portable"
-CCP_DL="https://github.com/$CCP_REPO/releases/latest/download"
+CCP_DL="${CCP_DL:-https://github.com/$CCP_REPO/releases/latest/download}"  # surcharge = recette locale ; signature toujours exigée
 CCP_CONTRACT=1   # version du contrat CLI attendue de ccp-core (`ccp-core --contract`)
 
 # Clé publique qui signe les SHA256SUMS des releases du portable
@@ -281,7 +281,7 @@ cc_claude_stable_cached() {
 # clé), en gardant la version précédente (claude.prev) pour revenir en arrière.
 # $1 = canal (stable/latest)
 cc_update() {
-  local channel="${1:-stable}" ver manifest plat binname sha tmp dst old
+  local channel="${1:-stable}" ver manifest plat binname sha tmp dst old here_ok=0
   local plats=()
   old="$(tr -d ' \r\n' < "$ROOT/VERSION" 2>/dev/null)"
   ver="$(curl -fsSL "$CC_RELEASES/$channel")" || { cc_warn "Pas de réseau."; return 1; }
@@ -300,8 +300,13 @@ cc_update() {
     if curl -fsSL "$CC_RELEASES/$ver/$plat/$binname" -o "$tmp" && cc_check_sha "$tmp" "$sha"; then
       [ -f "$dst" ] && mv -f "$dst" "$dst.prev" && printf '%s' "${old:-?}" > "$ROOT/bin/$plat/.prev-version"
       mv -f "$tmp" "$dst"; chmod +x "$dst" 2>/dev/null || true; cc_ok "$plat à jour ($ver)"
+      [ "$plat" = "$PLAT" ] && here_ok=1
     else rm -f "$tmp"; cc_warn "$plat : échec ou empreinte invalide, ancienne version conservée."; fi
   done
+  # VERSION décrit le binaire de CETTE plateforme : on ne l'avance que s'il a
+  # réellement été remplacé (sinon le bandeau « mise à jour disponible » disparaît
+  # alors que l'ancien binaire tourne toujours).
+  [ "$here_ok" = 1 ] || { cc_warn "Claude n'a pas été mis à jour sur $PLAT (version ${old:-?} conservée)."; return 1; }
   printf '%s' "$ver" > "$ROOT/VERSION"
   rm -f "$ROOT/.cache/claude-stable"
   cc_ok "Claude = $ver"
@@ -341,17 +346,29 @@ cc_update_portable() {
 }
 
 # ─── Effacement ─────────────────────────────────────────────────────────
-# Supprime les sessions du Trousseau macOS propres à CE portable (jamais celle du
-# Claude Code normal de la machine). Passe par le noyau ; repli bash identique.
-cc_purge_keychain() {
-  [ "${CC_OS:-}" = darwin ] || return 0
+# Efface les sessions de CE portable : Trousseau macOS (services suffixés
+# seulement, jamais la session Claude Code normale de la machine) ET identifiants
+# en fichier (seul magasin sous Windows/Linux). Passe par le noyau ; le repli
+# bash couvre le cas « noyau absent », sinon un poste invité garderait tout.
+# Rend 0 seulement si tout ce qui existait a été effacé.
+cc_purge_sessions() {
   ccp_core accounts purge >/dev/null 2>&1 && return 0
-  local d cfg
+  local d cfg f rc=0
   for d in "$ROOT"/config/*/; do
     [ -d "$d" ] || continue; cfg="${d%/}"
-    security delete-generic-password -s "Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)" >/dev/null 2>&1 || true
+    if [ "${CC_OS:-}" = darwin ]; then
+      security delete-generic-password -s "Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)" >/dev/null 2>&1 || true
+    fi
+    for f in .credentials.json oauth.token oauth.token.bak .ccp-pending; do
+      [ -e "$cfg/$f" ] || continue
+      rm -f "$cfg/$f" 2>/dev/null || rc=1
+      [ -e "$cfg/$f" ] && rc=1
+    done
   done
+  return "$rc"
 }
+# Ancien nom, gardé pour les appelants existants.
+cc_purge_keychain() { cc_purge_sessions; }
 # Efface toutes les sessions et jetons du portable (Trousseau compris).
 cc_wipe() {
   cc_purge_keychain

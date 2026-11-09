@@ -388,8 +388,8 @@ ask_host_trust() {
 quit_wizard() {
   clear 2>/dev/null || true
   if [ "$(host_trust)" = guest ]; then
-    if [ -n "${CORE:-}" ]; then ccp_core accounts purge >/dev/null 2>&1 || true; else cc_purge_keychain; fi
-    note "Connexions Claude effacées de cet ordinateur (il faudra te reconnecter la prochaine fois)."
+    if cc_purge_sessions; then note "Connexions Claude effacées de cet ordinateur (il faudra te reconnecter la prochaine fois)."
+    else bad "Effacement INCOMPLET des connexions : supprime à la main le dossier $ROOT/config avant de partir."; fi
   fi
   gum style --foreground "$ORANGE" --bold --margin "1 0 1 2" "À bientôt 👋"
   if [ "$CC_OS" = win32 ]; then exit 0; else exec "${SHELL:-/bin/zsh}" -l; fi
