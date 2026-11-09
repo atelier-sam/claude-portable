@@ -181,7 +181,7 @@ fn read_file_store(p: &ProfileDir) -> Result<Option<Loaded>, StoreError> {
 /// (repli que Claude utilise lui-même quand le Trousseau est inutilisable).
 pub fn read_login(env: &Env, p: &ProfileDir) -> Result<Option<Loaded>, StoreError> {
     #[cfg(target_os = "macos")]
-    {
+    if !env.no_keychain {
         let svc = keychain::service_name(&p.cfg);
         match keychain::find(env, &svc) {
             Ok(Some(item)) => {

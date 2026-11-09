@@ -15,6 +15,8 @@ pub struct Env {
     pub token_url: String,
     /// Trousseau explicite (tests : trousseau temporaire). `None` = trousseaux par défaut.
     pub keychain: Option<PathBuf>,
+    /// `CCP_NO_KEYCHAIN=1` : ne jamais toucher au Trousseau (tests hermétiques).
+    pub no_keychain: bool,
     pub home: PathBuf,
     pub user: String,
     /// Chemin du binaire claude donné par `--claude` ou `$CCP_CLAUDE_BIN`.
@@ -63,6 +65,7 @@ impl Env {
                 .to_string(),
             token_url: nonempty("CCP_TOKEN_URL").unwrap_or_else(|| DEFAULT_TOKEN_URL.to_string()),
             keychain: nonempty("CCP_KEYCHAIN").map(PathBuf::from),
+            no_keychain: nonempty("CCP_NO_KEYCHAIN").is_some_and(|v| v == "1"),
             home,
             user,
             claude: claude_flag
@@ -94,6 +97,7 @@ impl Env {
             api_base: "http://127.0.0.1:1".into(),
             token_url: "http://127.0.0.1:1/token".into(),
             keychain: None,
+            no_keychain: true,
             home,
             user: "testeur".into(),
             claude: None,
