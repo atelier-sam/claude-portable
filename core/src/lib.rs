@@ -16,6 +16,7 @@ pub mod lock;
 pub mod model;
 pub mod oauth;
 pub mod plan;
+pub mod privdir;
 pub mod purge;
 pub mod recommend;
 pub mod remote;

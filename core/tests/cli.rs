@@ -1389,3 +1389,67 @@ mod keychain {
         assert_eq!(kc.read("testeur", &svc).as_deref(), Some(blob.as_str()));
     }
 }
+
+// -------------------------------------------------------------------- purge
+
+#[test]
+fn purge_erases_every_secret_and_says_so_when_a_claude_session_is_open() {
+    let sb = Sandbox::new();
+    let d = sb.profile_dir("client");
+    for f in [
+        ".credentials.json",
+        "oauth.token",
+        "oauth.token.bak",
+        ".ccp-pending",
+    ] {
+        std::fs::write(d.join(f), "secret").unwrap();
+    }
+    std::fs::write(d.join("settings.json"), "{}").unwrap();
+    // Une « session Claude ouverte » : le verrou de session est tenu par ce test.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(d.join(".ccp-session.lock"))
+        .unwrap();
+    held.try_lock().expect("verrou de test");
+
+    let o = sb.run(None, &["accounts", "purge"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("Attention") && out.contains("client"), "{out}");
+    assert!(out.contains("ouvert"), "{out}");
+    for f in [
+        ".credentials.json",
+        "oauth.token",
+        "oauth.token.bak",
+        ".ccp-pending",
+    ] {
+        assert!(!d.join(f).exists(), "{f} devait être effacé");
+    }
+    assert!(d.join("settings.json").exists());
+    drop(held);
+}
+
+#[test]
+fn purge_that_cannot_erase_something_exits_10_and_names_it() {
+    let sb = Sandbox::new();
+    let d = sb.profile_dir("client");
+    std::fs::write(d.join(".credentials.json"), "secret").unwrap();
+    // Un répertoire occupe le nom du jeton : impossible à effacer comme fichier.
+    std::fs::create_dir(d.join("oauth.token")).unwrap();
+
+    let o = sb.run(None, &["accounts", "purge"]);
+    assert_eq!(code(&o), 10, "{}", stdout(&o));
+    assert!(
+        stdout(&o).contains("ÉCHEC") && stdout(&o).contains("oauth.token"),
+        "{}",
+        stdout(&o)
+    );
+    assert!(stderr(&o).contains("INCOMPLÈTE"), "{}", stderr(&o));
+    assert!(
+        !d.join(".credentials.json").exists(),
+        "le reste est tout de même effacé"
+    );
+}

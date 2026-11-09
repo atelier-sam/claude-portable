@@ -46,12 +46,16 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    # ACL explicite des dossiers de travail privés (privdir.rs).
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_JobObjects",
     # SHELLEXECUTEINFOW (élévation par ShellExecuteExW) est protégée par cette
     # fonctionnalité sur x64/arm64 : elle ne sert qu'à rendre la structure visible.
     "Win32_System_Registry",
+    # GetSystemWindowsDirectoryW : dossiers Program Files sans passer par l'environnement.
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

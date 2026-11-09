@@ -211,7 +211,18 @@ pub fn extract_tgz_member(
 /// (« zip slip ») et plafonne la taille décompressée. Renvoie le nombre de fichiers.
 pub fn extract_zip(archive: &Path, dest_dir: &Path, max_total: u64) -> Result<usize> {
     let f = File::open(archive).map_err(|e| io_err("archive illisible", e))?;
-    let mut zip = zip::ZipArchive::new(f)
+    extract_zip_from(f, dest_dir, max_total)
+}
+
+/// Comme [`extract_zip`], depuis des octets DÉJÀ vérifiés en mémoire : l'archive
+/// n'est pas relue sur le disque, donc personne ne peut la remplacer entre la
+/// vérification de son SHA-256 et son extraction.
+pub fn extract_zip_bytes(bytes: &[u8], dest_dir: &Path, max_total: u64) -> Result<usize> {
+    extract_zip_from(io::Cursor::new(bytes), dest_dir, max_total)
+}
+
+fn extract_zip_from<R: Read + io::Seek>(r: R, dest_dir: &Path, max_total: u64) -> Result<usize> {
+    let mut zip = zip::ZipArchive::new(r)
         .map_err(|e| CcpError::Internal(format!("archive .zip illisible : {e}")))?;
     fs::create_dir_all(dest_dir).map_err(|e| io_err("dossier de destination impossible", e))?;
     let mut total = 0u64;
@@ -434,6 +445,10 @@ mod tests {
         .unwrap();
         let out = t.path().join("sortie été");
         assert_eq!(extract_zip(&arch, &out, 1000).unwrap(), 2);
+        let bytes = fs::read(&arch).unwrap();
+        let out2 = t.path().join("depuis-la-memoire");
+        assert_eq!(extract_zip_bytes(&bytes, &out2, 1000).unwrap(), 2);
+        assert_eq!(fs::read(out2.join("OpenSSH-Win64/sshd.exe")).unwrap(), b"s");
         assert_eq!(fs::read(out.join("OpenSSH-Win64/sshd.exe")).unwrap(), b"s");
         assert_eq!(fs::read(out.join("OpenSSH-Win64/sub/x.dll")).unwrap(), b"d");
 

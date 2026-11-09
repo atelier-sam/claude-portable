@@ -113,32 +113,86 @@ impl Drop for RenewingMark<'_> {
     }
 }
 
-/// Verrou pour `run`. Un renouvellement concurrent est attendu (≤ 15 s) ; un
-/// détenteur de session est refusé après une courte confirmation (un `status`
-/// simultané ne tient son verrou partagé que quelques microsecondes).
-pub fn acquire_for_run(p: &ProfileDir) -> Result<SessionGuard> {
+enum Outcome {
+    Got(SessionGuard),
+    /// Le verrou reste tenu après l'attente : `renewing` dit si c'était (encore)
+    /// un renouvellement de jeton, sinon une session ouverte.
+    HeldByOther {
+        renewing: bool,
+    },
+    Unsupported(String),
+}
+
+/// Prend le verrou en patientant : un renouvellement concurrent est attendu
+/// (≤ 15 s) ; un détenteur de session est confirmé après quelques essais courts
+/// (un `status` simultané ne tient son verrou partagé que quelques microsecondes).
+fn acquire_patiently(p: &ProfileDir) -> Outcome {
     let start = std::time::Instant::now();
     let mut quick_retries = 0;
     loop {
         match try_acquire(p) {
-            Acquire::Got(g) => return Ok(g),
-            Acquire::Unsupported(why) => {
-                eprintln!("ccp-core : {why} — session lancée sans verrou (renouvellement automatique désactivé pour ce profil).");
-                return Ok(SessionGuard { _file: None });
-            }
+            Acquire::Got(g) => return Outcome::Got(g),
+            Acquire::Unsupported(why) => return Outcome::Unsupported(why),
             Acquire::Busy => {
-                if renewing_fresh(p) && start.elapsed() < Duration::from_secs(15) {
+                let renewing = renewing_fresh(p);
+                if renewing && start.elapsed() < Duration::from_secs(15) {
                     std::thread::sleep(Duration::from_millis(200));
-                } else if quick_retries < 4 {
+                } else if quick_retries < 4 && !renewing {
                     quick_retries += 1;
                     std::thread::sleep(Duration::from_millis(120));
                 } else {
-                    return Err(CcpError::SessionBusy(
-                        "ce compte est déjà ouvert dans une autre fenêtre".into(),
-                    ));
+                    return Outcome::HeldByOther { renewing };
                 }
             }
         }
+    }
+}
+
+/// Verrou pour `run`. Un renouvellement concurrent est attendu (≤ 15 s) ; un
+/// détenteur de session est refusé après une courte confirmation.
+pub fn acquire_for_run(p: &ProfileDir) -> Result<SessionGuard> {
+    match acquire_patiently(p) {
+        Outcome::Got(g) => Ok(g),
+        Outcome::Unsupported(why) => {
+            eprintln!("ccp-core : {why} — session lancée sans verrou (renouvellement automatique désactivé pour ce profil).");
+            Ok(SessionGuard { _file: None })
+        }
+        Outcome::HeldByOther { .. } => Err(CcpError::SessionBusy(
+            "ce compte est déjà ouvert dans une autre fenêtre".into(),
+        )),
+    }
+}
+
+/// Résultat de la prise du verrou par `purge`.
+pub enum PurgeLock {
+    /// Verrou pris : plus aucun renouvellement ne peut réécrire d'identifiants
+    /// tant que ce garde vit.
+    Held(SessionGuard),
+    /// Le dossier du profil n'existe pas : rien à protéger ni à effacer en fichier.
+    NoFolder,
+    /// Un Claude ouvert tient le verrou de session : on purge quand même.
+    SessionOpen,
+    /// Un renouvellement tenait encore le verrou après 15 s : on purge quand même.
+    RenewalStuck,
+    /// Le volume ne sait pas verrouiller : on purge sans verrou.
+    Unsupported(String),
+}
+
+/// Verrou pour `purge`. Contrairement à `run`, un verrou tenu par une session
+/// n'EMPÊCHE pas l'effacement (un invité qui part doit partir sans identifiants) :
+/// l'appelant le signale. Un renouvellement en cours est attendu d'abord, sinon il
+/// réécrirait des identifiants juste après l'effacement.
+pub fn acquire_for_purge(p: &ProfileDir) -> PurgeLock {
+    // `try_acquire` crée le fichier de verrou : on ne ressuscite pas un dossier
+    // de profil disparu.
+    if !p.dir.is_dir() {
+        return PurgeLock::NoFolder;
+    }
+    match acquire_patiently(p) {
+        Outcome::Got(g) => PurgeLock::Held(g),
+        Outcome::HeldByOther { renewing: false } => PurgeLock::SessionOpen,
+        Outcome::HeldByOther { renewing: true } => PurgeLock::RenewalStuck,
+        Outcome::Unsupported(why) => PurgeLock::Unsupported(why),
     }
 }
 

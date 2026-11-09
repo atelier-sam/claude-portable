@@ -8,9 +8,23 @@
 //!
 //! Aucune clé n'est posée : les éditions en licence en volume s'installent
 //! « non activées » (libellé du catalogue) et `AUTOACTIVATE` vaut 0.
+//!
+//! CONFIANCE DANS `setup.exe` (revue terminale du 09/11/2026). `setup.exe` tourne
+//! ÉLEVÉ. Un `tools/odt/setup.exe` déposé sur le portable (clé USB prêtée, autre PC)
+//! serait donc exécuté avec les droits d'administrateur. CHOIX : on ne prend JAMAIS
+//! celui du portable. L'ODT n'est cherché que sous `%ProgramFiles%` (et son pendant
+//! x86), dossiers où seul un administrateur peut écrire ; absent, il est installé frais
+//! par winget (`Microsoft.OfficeDeploymentTool`), dont le manifeste épingle le SHA-256
+//! de l'installeur. Écarté : une vérification Authenticode (WinVerifyTrust + éditeur
+//! « Microsoft Corporation ») d'un fichier du portable, car un binaire signé Microsoft
+//! mais AUTRE que l'ODT (ancien, vulnérable) passerait, et ce code FFI n'est pas
+//! éprouvable ici. Avant de l'exécuter, le `setup.exe` retenu est de plus COPIÉ dans le
+//! dossier de travail privé (ACL utilisateur seul) et c'est la copie qui est lancée :
+//! aucun remplacement possible entre la recherche et l'exécution.
 
 use super::winget::{self, Status, Winget};
 use crate::error::{CcpError, Result};
+use crate::privdir::{self, PrivateDir};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -259,8 +273,11 @@ pub trait OfficeHost {
     fn free_bytes(&self, dir: &Path) -> std::io::Result<u64>;
     fn system_drive(&self) -> PathBuf;
     fn temp_dir(&self) -> PathBuf;
-    /// `setup.exe` de l'ODT déjà présent, s'il y en a un.
+    /// `setup.exe` de l'ODT déjà présent dans un dossier réservé aux administrateurs
+    /// (jamais sur le portable), s'il y en a un.
     fn find_setup(&self) -> Option<PathBuf>;
+    /// Copie `setup.exe` dans le dossier de travail privé : c'est la COPIE qu'on exécute.
+    fn stage_setup(&self, from: &Path, to: &Path) -> std::io::Result<()>;
     /// Installe l'ODT (winget `Microsoft.OfficeDeploymentTool`). `Err` = message.
     fn install_odt(&self) -> std::result::Result<(), String>;
     /// `setup.exe /configure <xml>` ; `None` = délai dépassé.
@@ -290,43 +307,8 @@ impl OfficeResult {
     }
 }
 
-/// Dossier de travail `ccp-odt-<id>` effacé à la fin, QUOI qu'il arrive (Drop).
-struct Staging {
-    dir: PathBuf,
-}
-
-impl Staging {
-    fn create(parent: &Path) -> std::io::Result<Staging> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        // `create_dir` (et non `create_dir_all`) : échoue si le nom existe déjà, donc on
-        // ne réutilise jamais le dossier d'un autre processus.
-        for attempt in 0..20u32 {
-            let dir = parent.join(format!(
-                "ccp-odt-{:x}-{:x}-{attempt}",
-                std::process::id(),
-                nanos
-            ));
-            match std::fs::create_dir(&dir) {
-                Ok(()) => return Ok(Staging { dir }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "nom de dossier temporaire indisponible",
-        ))
-    }
-}
-
-impl Drop for Staging {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
+/// Préfixe des dossiers de travail d'`install` (balayés au démarrage s'ils sont orphelins).
+pub const STAGING_PREFIX: &str = "ccp-odt-";
 
 pub fn install(
     host: &dyn OfficeHost,
@@ -374,22 +356,40 @@ pub fn install(
         }
     };
 
-    // 3. Staging jetable + configuration.
-    let staging = match Staging::create(&host.temp_dir()) {
+    // 3. Dossier de travail PRIVÉ (ACL explicite) + configuration. Les restes d'une
+    // installation tuée net (configuration, copie de setup.exe) sont balayés d'abord.
+    let temp = host.temp_dir();
+    let swept = privdir::sweep_orphans(&temp, STAGING_PREFIX);
+    for (dir, why) in &swept.failed {
+        host.progress(&format!(
+            "Reste d'une installation précédente impossible à effacer : {} ({why})",
+            dir.display()
+        ));
+    }
+    let staging = match PrivateDir::create(&temp, STAGING_PREFIX) {
         Ok(s) => s,
         Err(e) => return OfficeResult::fail(format!("dossier temporaire impossible : {e}")),
     };
-    let xml_path = staging.dir.join("configuration.xml");
+    let xml_path = staging.path.join("configuration.xml");
     if let Err(e) = std::fs::write(&xml_path, build_xml(edition, lang, apps, bits)) {
         return OfficeResult::fail(format!("configuration.xml impossible à écrire : {e}"));
     }
+    // On n'exécute que la COPIE, posée dans un dossier où personne d'autre n'écrit.
+    let local_setup = staging.path.join("setup.exe");
+    if let Err(e) = host.stage_setup(&setup, &local_setup) {
+        return OfficeResult::fail(format!(
+            "setup.exe ({}) n'a pas pu être copié dans le dossier de travail : {e}",
+            setup.display()
+        ));
+    }
 
-    // 4. Installation. `staging` est effacé en sortant de la fonction, succès ou non.
+    // 4. Installation. Le dossier de travail est effacé ensuite, succès ou non (Drop en
+    // dernier recours, `finish` vérifie : un échec d'effacement se DIT).
     host.progress(&format!(
         "Installation de {} en cours (10 à 30 minutes, téléchargement compris)…",
         edition.label
     ));
-    match host.run_setup(&setup, &xml_path, &staging.dir) {
+    let mut result = match host.run_setup(&local_setup, &xml_path, &staging.path) {
         Ok(Some(0)) => OfficeResult {
             ok: true,
             detail: if edition.channel.starts_with("PerpetualVL") {
@@ -412,34 +412,74 @@ pub fn install(
             SETUP_TIMEOUT.as_secs() / 3600
         )),
         Err(e) => OfficeResult::fail(format!("setup.exe n'a pas pu être lancé : {e}")),
+    };
+    if let Err(why) = staging.finish() {
+        result.detail = format!(
+            "{} (ATTENTION : dossier de travail non effacé, {why} ; il sera retiré à la prochaine installation)",
+            result.detail
+        );
     }
+    result
 }
 
 // ------------------------------------------------------------------ hôte réel
 
 pub struct RealHost<'a> {
     pub env: &'a crate::env::Env,
-    pub root: &'a crate::root::Root,
     pub winget: &'a dyn Winget,
+}
+
+/// Dossiers où `setup.exe` de l'ODT est cherché : RÉSERVÉS aux administrateurs.
+///
+/// Sous Windows ils sont déduits du dossier Windows rendu par l'API (pas des variables
+/// d'environnement `ProgramFiles*`, qu'un utilisateur peut redéfinir pour faire exécuter
+/// SON binaire à un processus élevé). Hors Windows (bancs d'essai), les variables font foi.
+#[cfg(windows)]
+fn trusted_install_dirs() -> Vec<PathBuf> {
+    use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    let mut buf = [0u16; 260];
+    // SAFETY : tampon de 260 caractères, taille passée à l'appel.
+    let n = unsafe { GetSystemWindowsDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n < 3 || n > buf.len() {
+        return vec![];
+    }
+    let win = String::from_utf16_lossy(&buf[..n]);
+    // « C:\Windows » -> « C:\ »
+    let drive = win.get(..3).unwrap_or("C:\\").to_string();
+    ["Program Files", "Program Files (x86)"]
+        .iter()
+        .map(|d| PathBuf::from(format!("{drive}{d}")))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn trusted_install_dirs() -> Vec<PathBuf> {
+    ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(|v| std::env::var_os(v).map(PathBuf::from))
+        .collect()
+}
+
+/// Candidats pour `setup.exe`. Le portable n'en fait JAMAIS partie : la fonction ne
+/// reçoit même pas sa racine. `odt_override` (`CCP_ODT_SETUP`, bancs d'essai) est ignoré
+/// sous Windows : une variable d'environnement ne désigne pas ce qu'un processus élevé exécute.
+pub fn setup_candidates(odt_override: Option<&str>, program_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    #[cfg(not(windows))]
+    if let Some(p) = odt_override {
+        v.push(PathBuf::from(p));
+    }
+    #[cfg(windows)]
+    let _ = odt_override;
+    for pf in program_dirs {
+        v.push(pf.join("OfficeDeploymentTool").join("setup.exe"));
+    }
+    v
 }
 
 impl RealHost<'_> {
     fn setup_candidates(&self) -> Vec<PathBuf> {
-        let mut v = Vec::new();
-        if let Some(p) = &self.env.ovr.odt_setup {
-            v.push(PathBuf::from(p));
-        }
-        v.push(self.root.path().join("tools").join("odt").join("setup.exe"));
-        for var in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
-            if let Some(pf) = std::env::var_os(var) {
-                v.push(
-                    PathBuf::from(pf)
-                        .join("OfficeDeploymentTool")
-                        .join("setup.exe"),
-                );
-            }
-        }
-        v
+        setup_candidates(self.env.ovr.odt_setup.as_deref(), &trusted_install_dirs())
     }
 }
 
@@ -456,6 +496,22 @@ impl OfficeHost for RealHost<'_> {
     }
     fn find_setup(&self) -> Option<PathBuf> {
         self.setup_candidates().into_iter().find(|p| p.is_file())
+    }
+    fn stage_setup(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        // `create_new` : jamais par-dessus un fichier qui existerait déjà dans le dossier.
+        let mut src = std::fs::File::open(from)?;
+        let mut dst = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(to)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
     }
     fn install_odt(&self) -> std::result::Result<(), String> {
         let app = super::catalog::App {
@@ -704,6 +760,8 @@ mod tests {
 
     // ---- déroulé avec un hôte simulé
 
+    type SetupHook = Box<dyn Fn(&Path)>;
+
     struct FakeHost {
         free: u64,
         temp: PathBuf,
@@ -714,6 +772,10 @@ mod tests {
         odt_installs: Cell<u32>,
         xml_seen: RefCell<String>,
         staging_seen: RefCell<Option<PathBuf>>,
+        setup_run: RefCell<Option<PathBuf>>,
+        stage_fails: Cell<bool>,
+        /// Appelé dans le dossier de travail pendant « setup.exe » (effet de bord de test).
+        during_setup: RefCell<Option<SetupHook>>,
     }
 
     impl FakeHost {
@@ -728,6 +790,9 @@ mod tests {
                 odt_installs: Cell::new(0),
                 xml_seen: RefCell::new(String::new()),
                 staging_seen: RefCell::new(None),
+                setup_run: RefCell::new(None),
+                stage_fails: Cell::new(false),
+                during_setup: RefCell::new(None),
             }
         }
     }
@@ -745,6 +810,12 @@ mod tests {
         fn find_setup(&self) -> Option<PathBuf> {
             self.setup_present.get().then(|| PathBuf::from("setup.exe"))
         }
+        fn stage_setup(&self, _from: &Path, to: &Path) -> std::io::Result<()> {
+            if self.stage_fails.get() {
+                return Err(std::io::Error::other("copie refusée"));
+            }
+            std::fs::write(to, b"copie-de-setup")
+        }
         fn install_odt(&self) -> std::result::Result<(), String> {
             self.odt_installs.set(self.odt_installs.get() + 1);
             if self.odt_install.is_ok() {
@@ -752,11 +823,15 @@ mod tests {
             }
             self.odt_install.clone()
         }
-        fn run_setup(&self, _s: &Path, xml: &Path, cwd: &Path) -> std::io::Result<Option<i32>> {
+        fn run_setup(&self, s: &Path, xml: &Path, cwd: &Path) -> std::io::Result<Option<i32>> {
             self.ran.set(self.ran.get() + 1);
             *self.xml_seen.borrow_mut() = std::fs::read_to_string(xml).unwrap();
             *self.staging_seen.borrow_mut() = Some(cwd.to_path_buf());
+            *self.setup_run.borrow_mut() = Some(s.to_path_buf());
             assert!(cwd.is_dir(), "le staging doit exister pendant setup.exe");
+            if let Some(f) = self.during_setup.borrow().as_ref() {
+                f(cwd);
+            }
             Ok(self.setup_exit)
         }
         fn progress(&self, _m: &str) {}
@@ -852,6 +927,9 @@ mod tests {
             fn find_setup(&self) -> Option<PathBuf> {
                 self.0.find_setup()
             }
+            fn stage_setup(&self, f: &Path, t: &Path) -> std::io::Result<()> {
+                self.0.stage_setup(f, t)
+            }
             fn install_odt(&self) -> std::result::Result<(), String> {
                 self.0.install_odt()
             }
@@ -867,5 +945,122 @@ mod tests {
         let r = install(&h, &EDITIONS[0], "fr-fr", &all_apps(), "64");
         assert!(!r.ok);
         assert_eq!(h.0.ran.get(), 0);
+    }
+
+    #[test]
+    fn the_portable_is_never_a_place_to_look_for_setup_exe() {
+        let t = tempfile::tempdir().unwrap();
+        // Un setup.exe PIÉGÉ déposé sur le portable.
+        let planted = t.path().join("tools/odt/setup.exe");
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::fs::write(&planted, b"PIEGE").unwrap();
+        let pf = vec![PathBuf::from("/pf"), PathBuf::from("/pf86")];
+        let c = setup_candidates(None, &pf);
+        assert_eq!(
+            c,
+            vec![
+                PathBuf::from("/pf/OfficeDeploymentTool/setup.exe"),
+                PathBuf::from("/pf86/OfficeDeploymentTool/setup.exe")
+            ]
+        );
+        assert!(!c.contains(&planted));
+        // Le même constat sur l'hôte réel, racine du portable comprise.
+        let env = crate::env::Env::for_tests(t.path().to_path_buf());
+        struct NoWinget;
+        impl Winget for NoWinget {
+            fn run(
+                &self,
+                _a: &[String],
+                _t: Duration,
+            ) -> std::io::Result<crate::win::winget::RunOut> {
+                Err(std::io::Error::other("pas de winget"))
+            }
+        }
+        let host = RealHost {
+            env: &env,
+            winget: &NoWinget,
+        };
+        assert!(!host.setup_candidates().contains(&planted));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_test_override_is_honoured_off_windows_only() {
+        // (Sous Windows la variable est ignorée : voir `setup_candidates`.)
+        let c = setup_candidates(Some("/banc/setup.exe"), &[]);
+        assert_eq!(c, vec![PathBuf::from("/banc/setup.exe")]);
+    }
+
+    #[test]
+    fn what_runs_is_the_copy_in_the_private_staging_never_the_original() {
+        let t = tempfile::tempdir().unwrap();
+        let h = FakeHost::new(t.path());
+        assert!(install(&h, &EDITIONS[0], "fr-fr", &all_apps(), "64").ok);
+        let run = h.setup_run.borrow().clone().unwrap();
+        let staging = h.staging_seen.borrow().clone().unwrap();
+        assert_ne!(
+            run,
+            PathBuf::from("setup.exe"),
+            "l'original n'est pas lancé"
+        );
+        assert_eq!(run, staging.join("setup.exe"));
+        assert!(staging
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("ccp-odt-"));
+    }
+
+    #[test]
+    fn a_setup_that_cannot_be_copied_is_not_run() {
+        let t = tempfile::tempdir().unwrap();
+        let h = FakeHost::new(t.path());
+        h.stage_fails.set(true);
+        let r = install(&h, &EDITIONS[0], "fr-fr", &all_apps(), "64");
+        assert!(!r.ok);
+        assert!(r.detail.contains("copié"), "{}", r.detail);
+        assert_eq!(h.ran.get(), 0);
+        assert_eq!(leftovers(t.path()), 0);
+    }
+
+    #[test]
+    fn orphan_staging_of_a_killed_install_is_swept_before_a_new_one() {
+        let t = tempfile::tempdir().unwrap();
+        let orphan = t.path().join("ccp-odt-mort-1-0");
+        std::fs::create_dir(&orphan).unwrap();
+        std::fs::write(orphan.join(".ccp-lock"), "").unwrap();
+        std::fs::write(orphan.join("setup.exe"), "copie oubliée").unwrap();
+        let h = FakeHost::new(t.path());
+        assert!(install(&h, &EDITIONS[0], "fr-fr", &all_apps(), "64").ok);
+        assert!(!orphan.exists());
+        assert_eq!(leftovers(t.path()), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cleanup_failure_is_reported_in_the_result_not_swallowed() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let h = FakeHost::new(t.path());
+        *h.during_setup.borrow_mut() = Some(Box::new(|cwd: &Path| {
+            let d = cwd.join("verrouille");
+            std::fs::create_dir(&d).unwrap();
+            std::fs::write(d.join("x"), "x").unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }));
+        let r = install(&h, &EDITIONS[0], "fr-fr", &all_apps(), "64");
+        assert!(r.ok, "l'installation a réussi : {r:?}");
+        assert!(r.detail.contains("non effacé"), "{}", r.detail);
+        // Nettoyage du test lui-même.
+        let left = h.staging_seen.borrow().clone().unwrap();
+        std::fs::set_permissions(
+            left.join("verrouille"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(left).unwrap();
     }
 }

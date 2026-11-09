@@ -4,10 +4,15 @@
 //!
 //! Déroulé (PLAN, correction 6) :
 //! 1. consentement explicite (texte affiché, « OUI » à taper) ;
-//! 2. OpenSSH portable (Win32-OpenSSH, zip épinglé et vérifié) dans `tools/openssh/` ;
-//! 3. dossier de travail `%TEMP%\ccp-share-<id>` : clé d'hôte ÉPHÉMÈRE, `sshd_config`
-//!    temporaire (127.0.0.1, port libre, clés seules, `AllowUsers` = l'utilisateur
-//!    courant), `authorized_keys` temporaire ;
+//! 2. OpenSSH portable (Win32-OpenSSH) : le ZIP épinglé est gardé dans `tools/openssh/`
+//!    et son SHA-256 est revérifié à CHAQUE usage ; on n'exécute jamais un dossier
+//!    extrait qui resterait sur le portable (sshd tourne ÉLEVÉ : un fichier déposé là
+//!    entre deux usages serait exécuté avec les droits d'administrateur) ;
+//! 3. dossier de travail PRIVÉ `%TEMP%\ccp-share-<id>` (ACL explicite : utilisateur
+//!    courant et SYSTEM seulement) : binaires OpenSSH extraits À CHAQUE usage des octets
+//!    vérifiés, clé d'hôte ÉPHÉMÈRE, `sshd_config` temporaire (127.0.0.1, port libre, clés
+//!    seules, `AllowUsers` = l'utilisateur courant), `authorized_keys` temporaire. Au
+//!    démarrage, les `ccp-share-*` ORPHELINS d'un partage tué net sont effacés ;
 //! 4. UNE connexion ssh vers le Mac (donc un seul mot de passe) qui porte `-R 0:127.0.0.1:<port>`
 //!    et un script distant : il rend la clé publique des agents, attend la ligne de
 //!    description du PC (avec le port alloué lu dans « Allocated port »), l'écrit dans
@@ -15,19 +20,22 @@
 //! 5. sshd est lancé au premier plan APRÈS réception de la clé publique ;
 //! 6. sshd et ssh vivent dans un Job Object « kill-on-close » ; Ctrl+C, fermeture de la
 //!    fenêtre ou mort de ccp-core : tout disparaît (fichier client côté Mac compris, par
-//!    le `trap` du script distant), le dossier de travail est effacé ;
+//!    le `trap` du script distant), le dossier de travail est effacé ET l'effacement
+//!    est VÉRIFIÉ : « tout a été retiré » n'est dit que si c'est vrai ;
 //! 7. journal `<racine>/logs/share-<date>.log` (événements + journal de sshd).
 
 use super::conf::Target;
 use super::connect::{self, Common, Deps, Prepared};
-use super::download::{extract_zip, fetch_verified};
+use super::download::{extract_zip_bytes, fetch_verified};
 use super::intr;
 use super::net::Fetch;
-use super::pins::{OPENSSH_WIN, OPENSSH_WIN_VERSION};
+use super::pins::{Asset, OPENSSH_WIN};
 use super::quote::{sh_quote, ssh_path_value, Style};
 use crate::env::Env;
 use crate::error::{CcpError, Result};
+use crate::privdir::{self, PrivateDir};
 use crate::root::Root;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -229,105 +237,83 @@ fn openssh_in(dir: &Path) -> OpenSsh {
     }
 }
 
-/// Garantit l'OpenSSH portable (vérifié) ; `override_dir` = `CCP_OPENSSH_DIR` (tests).
-pub fn ensure_openssh(
+/// D'où viennent sshd et ssh-keygen de CETTE session.
+pub enum OpenSshSource {
+    /// Octets du zip épinglé, DÉJÀ vérifiés : extraits dans le dossier de travail privé.
+    Archive(Vec<u8>),
+    /// Dossier déjà prêt — `CCP_OPENSSH_DIR`, bancs d'essai hors Windows uniquement.
+    Existing(OpenSsh),
+}
+
+/// Sous-dossier du zip qui contient `sshd.exe` et `ssh-keygen.exe`.
+const ZIP_TOP: &str = "OpenSSH-Win64";
+
+/// Le zip épinglé, GARDÉ sur le portable mais relu et revérifié à CHAQUE usage.
+///
+/// WHY : sshd tourne ÉLEVÉ. Faire confiance à un dossier extrait une fois (marqueur
+/// `INSTALLED`) revient à exécuter en administrateur tout ce que quelqu'un a pu
+/// déposer sur le portable depuis (clé USB prêtée, autre PC). Ici, rien de ce qui
+/// s'exécute ne vient du disque du portable : seuls des octets dont le SHA-256 vient
+/// d'être calculé sont extraits — et extraits depuis la MÉMOIRE, sans relecture du
+/// fichier, donc sans fenêtre où on pourrait le remplacer.
+pub fn load_openssh_zip(
     root: &Root,
-    override_dir: Option<&Path>,
+    asset: &Asset,
     base: &str,
     fetch: &dyn Fetch,
     say: &mut dyn FnMut(&str),
-) -> Result<OpenSsh> {
-    if let Some(d) = override_dir {
-        return Ok(openssh_in(d));
+) -> Result<Vec<u8>> {
+    let top = root.path().join("tools").join("openssh").join(asset.tag);
+    // Ancienne disposition (dossier extrait persistant + marqueur) : plus jamais
+    // exécutée, retirée pour qu'elle ne soit pas prise pour de confiance.
+    let _ = fs::remove_file(top.join("INSTALLED"));
+    let _ = fs::remove_dir_all(top.join(ZIP_TOP));
+    let zip = top.join(asset.name);
+    if let Some(bytes) = read_if_pinned(&zip, asset) {
+        return Ok(bytes);
     }
-    let top = root
-        .path()
-        .join("tools")
-        .join("openssh")
-        .join(OPENSSH_WIN_VERSION);
-    let marker = top.join("INSTALLED");
-    let bin = top.join("OpenSSH-Win64");
-    let found = openssh_in(&bin);
-    let stamp = format!("{OPENSSH_WIN_VERSION} {}\n", OPENSSH_WIN.sha256);
-    if fs::read_to_string(&marker).ok().as_deref() == Some(stamp.as_str())
-        && found.sshd.is_file()
-        && found.keygen.is_file()
-    {
-        return Ok(found);
+    if zip.exists() {
+        say("L'archive OpenSSH du portable ne correspond pas à l'empreinte épinglée : elle est remplacée.");
+        let _ = fs::remove_file(&zip);
     }
     say(&format!(
-        "Téléchargement d'OpenSSH portable {OPENSSH_WIN_VERSION} (une seule fois, vérifié par SHA-256)…"
+        "Téléchargement d'OpenSSH portable {} (vérifié par SHA-256)…",
+        asset.tag
     ));
-    let _ = fs::remove_file(&marker);
-    let zip = top.join(OPENSSH_WIN.name);
-    fetch_verified(
-        fetch,
-        &OPENSSH_WIN.url(base),
-        &zip,
-        OPENSSH_WIN.sha256,
-        OPENSSH_WIN.max_bytes,
-    )?;
-    let unpacked = extract_zip(&zip, &top, 256 << 20);
-    let _ = fs::remove_file(&zip);
-    unpacked?;
+    fetch_verified(fetch, &asset.url(base), &zip, asset.sha256, asset.max_bytes)?;
+    read_if_pinned(&zip, asset).ok_or_else(|| {
+        CcpError::Internal("l'archive OpenSSH est illisible juste après son téléchargement".into())
+    })
+}
+
+/// Contenu du fichier si, et seulement si, son SHA-256 est celui de l'épingle.
+fn read_if_pinned(path: &Path, asset: &Asset) -> Option<Vec<u8>> {
+    let len = fs::metadata(path).ok()?.len();
+    if len > asset.max_bytes {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    let got = crate::util::hex_encode(&Sha256::digest(&bytes));
+    got.eq_ignore_ascii_case(asset.sha256).then_some(bytes)
+}
+
+/// Extrait les octets vérifiés dans `<dossier privé>/openssh` et rend les deux outils.
+fn extract_openssh(zip_bytes: &[u8], private: &Path) -> Result<OpenSsh> {
+    let dest = private.join("openssh");
+    extract_zip_bytes(zip_bytes, &dest, 256 << 20)?;
+    let found = openssh_in(&dest.join(ZIP_TOP));
     if !found.sshd.is_file() || !found.keygen.is_file() {
         return Err(CcpError::Internal(
             "l'archive OpenSSH ne contient pas sshd / ssh-keygen là où on les attend".into(),
         ));
     }
-    crate::atomic::write_atomic(&marker, stamp.as_bytes())
-        .map_err(|e| CcpError::Internal(format!("marqueur OpenSSH impossible à écrire : {e}")))?;
     Ok(found)
 }
 
 // --------------------------------------------------------------- dossier de travail
 
-/// `ccp-share-<id>` dans le dossier temporaire, effacé à la fin QUOI qu'il arrive (Drop).
-pub struct Staging {
-    pub dir: PathBuf,
-}
-
-impl Staging {
-    pub fn create(temp: &Path) -> Result<Staging> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        for attempt in 0..20u32 {
-            let dir = temp.join(format!(
-                "ccp-share-{:x}-{:x}-{attempt}",
-                std::process::id(),
-                nanos
-            ));
-            match fs::create_dir(&dir) {
-                Ok(()) => {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
-                    }
-                    return Ok(Staging { dir });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => {
-                    return Err(CcpError::Internal(format!(
-                        "dossier de travail impossible à créer dans {} : {e}",
-                        temp.display()
-                    )))
-                }
-            }
-        }
-        Err(CcpError::Internal(
-            "dossier de travail : trop de collisions de nom".into(),
-        ))
-    }
-}
-
-impl Drop for Staging {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
-}
+/// Préfixe des dossiers de travail de `share` (balayé au démarrage s'ils sont orphelins).
+pub const STAGING_PREFIX: &str = "ccp-share-";
 
 /// Journal de session : `<racine>/logs/share-<date>.log`, une ligne horodatée par événement.
 pub struct Journal {
@@ -387,7 +373,7 @@ fn start_sshd(
         .spawn()
         .map_err(|e| CcpError::Internal(format!("sshd impossible à lancer : {e}")))?;
     if let Err(e) = job.assign(&child) {
-        reap(&mut child);
+        let _ = reap(&mut child);
         return Err(e);
     }
     Ok((child, log_path))
@@ -420,15 +406,36 @@ fn pump<R: std::io::Read + Send + 'static>(
     });
 }
 
-/// Tue un enfant et l'attend (jamais d'orphelin).
-fn reap(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+/// Tue un enfant et attend sa fin (≤ 5 s : un `kill` refusé ne doit pas bloquer
+/// éternellement sur `wait`). `Err` = il est peut-être encore en vie.
+fn reap(child: &mut Child) -> std::result::Result<(), String> {
+    let kill_err = match child.kill() {
+        Ok(()) => None,
+        // Déjà terminé : rien à tuer.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => None,
+        Err(e) => Some(e.to_string()),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                return Err(format!(
+                    "toujours en vie après 5 s ({})",
+                    kill_err.unwrap_or_else(|| "kill sans effet".into())
+                ))
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
 }
 
 pub struct ShareEnv {
     pub temp: PathBuf,
-    pub openssh: OpenSsh,
+    pub openssh: OpenSshSource,
     pub style: Style,
     pub pc: String,
     pub user: String,
@@ -448,17 +455,28 @@ pub fn run_session(
     journal: &mut Journal,
     say: &mut dyn FnMut(&str),
 ) -> Result<i32> {
-    let staging = Staging::create(&senv.temp)?;
+    let staging = PrivateDir::create(&senv.temp, STAGING_PREFIX).map_err(|e| {
+        CcpError::Internal(format!(
+            "dossier de travail privé impossible à créer dans {} : {e}",
+            senv.temp.display()
+        ))
+    })?;
     let job = intr::Job::new_kill_on_close()?;
-    let host_key = staging.dir.join("hostkey");
+    // sshd et ssh-keygen : extraits des octets vérifiés, dans le dossier privé, À CHAQUE
+    // session. Si la suite échoue, le Drop du dossier privé efface tout.
+    let openssh = match &senv.openssh {
+        OpenSshSource::Archive(bytes) => extract_openssh(bytes, &staging.path)?,
+        OpenSshSource::Existing(o) => o.clone(),
+    };
+    let host_key = staging.path.join("hostkey");
     let paths = SshdPaths {
         host_key: host_key.clone(),
-        authorized_keys: staging.dir.join("authorized_keys"),
+        authorized_keys: staging.path.join("authorized_keys"),
     };
     let port = free_port()?;
 
     // Clé d'hôte éphémère.
-    let kg = Command::new(&senv.openssh.keygen)
+    let kg = Command::new(&openssh.keygen)
         .args([
             "-q",
             "-t",
@@ -479,9 +497,9 @@ pub fn run_session(
             String::from_utf8_lossy(&kg.stderr).trim()
         )));
     }
-    let host_pub = fs::read_to_string(staging.dir.join("hostkey.pub")).unwrap_or_default();
+    let host_pub = fs::read_to_string(staging.path.join("hostkey.pub")).unwrap_or_default();
     let config = sshd_config(senv.style, port, &senv.user, &paths)?;
-    let config_path = staging.dir.join("sshd_config");
+    let config_path = staging.path.join("sshd_config");
     fs::write(&config_path, config)
         .map_err(|e| CcpError::Internal(format!("sshd_config impossible à écrire : {e}")))?;
 
@@ -501,7 +519,7 @@ pub fn run_session(
         ))
     })?;
     if let Err(e) = job.assign(&ssh) {
-        reap(&mut ssh);
+        let _ = reap(&mut ssh);
         return Err(e);
     }
     let mut ssh_in = ssh.stdin.take();
@@ -544,7 +562,7 @@ pub fn run_session(
                                 ))
                             },
                         )?;
-                        start_sshd(&senv.openssh.sshd, &config_path, &staging.dir, &job)
+                        start_sshd(&openssh.sshd, &config_path, &staging.path, &job)
                     });
                     match started {
                         Ok((child, log_path)) => {
@@ -652,7 +670,9 @@ pub fn run_session(
     };
 
     // Nettoyage — dans cet ordre : fermer l'entrée de ssh (le script distant retire le fichier
-    // client), laisser ssh finir, puis tout ce qui reste.
+    // client), laisser ssh finir, puis tout ce qui reste. Chaque étape qui échoue est
+    // CONSIGNÉE : on ne dit « tout a été retiré » que si rien n'est resté.
+    let mut problems: Vec<String> = Vec::new();
     drop(ssh_in);
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -661,9 +681,18 @@ pub fn run_session(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    reap(&mut ssh);
+    if let Err(e) = reap(&mut ssh) {
+        problems.push(format!("ssh : {e}"));
+    }
     if let Some(d) = sshd.as_mut() {
-        reap(d);
+        if let Err(e) = reap(d) {
+            problems.push(format!("sshd : {e}"));
+        }
+    }
+    // sshd lance un processus FILS par connexion que `reap` ne voit pas : seul le Job
+    // les atteint, et ils tournent depuis le dossier de travail qu'on va effacer.
+    if let Err(e) = job.terminate_and_close() {
+        problems.push(format!("processus fils de sshd : {e}"));
     }
     // Garde une trace du journal de sshd dans le journal de session.
     if let Some(p) = &sshd_log_path {
@@ -673,10 +702,27 @@ pub fn run_session(
             }
         }
     }
-    journal.log("nettoyage terminé : fichier client, dossier de travail, processus");
-    drop(staging);
-    say("Partage terminé : tout a été retiré de ce PC.");
-    outcome
+    if let Err(e) = staging.finish() {
+        problems.push(format!("dossier de travail non effacé : {e}"));
+    }
+    if problems.is_empty() {
+        journal.log("nettoyage terminé : fichier client, dossier de travail, processus");
+        say("Partage terminé : tout a été retiré de ce PC.");
+        say("(La fiche du PC côté Mac est retirée par le Mac dès que la connexion est fermée.)");
+        return outcome;
+    }
+    let detail = problems.join(" ; ");
+    journal.log(&format!("nettoyage INCOMPLET : {detail}"));
+    say(&format!(
+        "Partage terminé, mais TOUT N'A PAS ÉTÉ RETIRÉ de ce PC : {detail}."
+    ));
+    say("Le dossier de travail peut contenir la clé d'hôte éphémère : il sera effacé au prochain partage, ou supprime-le à la main.");
+    match outcome {
+        Ok(_) => Err(CcpError::Internal(format!(
+            "partage terminé mais nettoyage incomplet : {detail}"
+        ))),
+        err => err,
+    }
 }
 
 /// Point d'entrée : consentement, préparation, session.
@@ -713,17 +759,47 @@ pub fn run(
         "consentement donné pour le PC {pc} (utilisateur {user})"
     ));
 
-    let openssh = ensure_openssh(
-        root,
-        env.ovr.openssh_dir.as_deref(),
-        deps.download_base,
-        deps.fetch,
-        &mut |m| say(m),
-    )?;
+    // Orphelins d'un partage précédent tué net (clé d'hôte éphémère, binaires extraits).
+    let temp = std::env::temp_dir();
+    let sweep = privdir::sweep_orphans(&temp, STAGING_PREFIX);
+    if sweep.removed > 0 {
+        let m = format!(
+            "{} dossier(s) de travail orphelin(s) d'un partage précédent effacé(s).",
+            sweep.removed
+        );
+        journal.log(&m);
+        say(&m);
+    }
+    for (dir, why) in &sweep.failed {
+        let m = format!(
+            "ATTENTION : reste d'un partage précédent impossible à effacer : {} ({why}). Supprime-le à la main.",
+            dir.display()
+        );
+        journal.log(&m);
+        say(&m);
+    }
+
+    // `CCP_OPENSSH_DIR` (bancs d'essai) n'est JAMAIS honoré sous Windows : sshd y tourne
+    // élevé, une variable d'environnement ne doit pas pouvoir désigner ce qu'on exécute.
+    let openssh = match (cfg!(windows), env.ovr.openssh_dir.as_deref()) {
+        (false, Some(d)) => OpenSshSource::Existing(openssh_in(d)),
+        (is_windows, ovr) => {
+            if is_windows && ovr.is_some() {
+                say("CCP_OPENSSH_DIR est ignoré sous Windows.");
+            }
+            OpenSshSource::Archive(load_openssh_zip(
+                root,
+                &OPENSSH_WIN,
+                deps.download_base,
+                deps.fetch,
+                &mut |m| say(m),
+            )?)
+        }
+    };
     let prepared = connect::prepare(env, root, deps, target, common, false)?;
     intr::install();
     let senv = ShareEnv {
-        temp: std::env::temp_dir(),
+        temp,
         openssh,
         style: deps.style,
         pc,
@@ -869,47 +945,153 @@ mod tests {
         assert!(s.contains(".ccp-portable/clients"));
     }
 
-    #[test]
-    fn staging_is_removed_on_drop_even_with_content() {
-        let t = tempfile::tempdir().unwrap();
-        let s = Staging::create(t.path()).unwrap();
-        let dir = s.dir.clone();
-        fs::write(dir.join("hostkey"), "x").unwrap();
-        assert!(dir.exists());
-        drop(s);
-        assert!(!dir.exists());
-        assert_eq!(fs::read_dir(t.path()).unwrap().count(), 0);
+    use crate::remote::download::testing::*;
+    use crate::remote::pins::Packaging;
+
+    /// Épingle de substitution pour les tests : le vrai zip est épinglé par SHA, on ne
+    /// peut pas en fabriquer un qui passe.
+    fn test_asset(zip: &[u8]) -> Asset {
+        Asset {
+            repo: "o/r",
+            tag: "v1",
+            name: "OpenSSH-Win64.zip",
+            sha256: Box::leak(sha_of(zip).into_boxed_str()),
+            packaging: Packaging::Zip,
+            max_bytes: 1 << 20,
+        }
+    }
+
+    fn good_zip() -> Vec<u8> {
+        // `exe()` : le nom change selon l'hôte (".exe" seulement sous Windows).
+        make_zip(&[
+            (&format!("OpenSSH-Win64/{}", exe("sshd")), b"sshd-verifie"),
+            (
+                &format!("OpenSSH-Win64/{}", exe("ssh-keygen")),
+                b"keygen-verifie",
+            ),
+        ])
+    }
+
+    fn root_in(t: &tempfile::TempDir) -> Root {
+        Root::new(t.path().to_str().unwrap(), crate::root::PathStyle::Unix).unwrap()
     }
 
     #[test]
-    fn openssh_is_downloaded_verified_and_reused() {
-        use crate::remote::download::testing::*;
+    fn openssh_zip_is_kept_and_reverified_at_every_use() {
         let t = tempfile::tempdir().unwrap();
-        let root = Root::new(t.path().to_str().unwrap(), crate::root::PathStyle::Unix).unwrap();
-        // Le vrai zip est épinglé par SHA ; un faux zip ne peut donc PAS passer.
-        let zip = make_zip(&[
-            ("OpenSSH-Win64/sshd.exe", b"s"),
-            ("OpenSSH-Win64/ssh-keygen.exe", b"k"),
-        ]);
+        let root = root_in(&t);
+        let zip = good_zip();
+        let asset = test_asset(&zip);
         let mut f = FakeFetch::default();
-        f.files.insert(OPENSSH_WIN.url("http://127.0.0.1:1"), zip);
-        let e = ensure_openssh(&root, None, "http://127.0.0.1:1", &f, &mut |_| {}).unwrap_err();
+        f.files.insert(asset.url("http://127.0.0.1:1"), zip.clone());
+        let on_disk = root.path().join("tools/openssh/v1/OpenSSH-Win64.zip");
+
+        let got = load_openssh_zip(&root, &asset, "http://127.0.0.1:1", &f, &mut |_| {}).unwrap();
+        assert_eq!(got, zip);
+        assert!(on_disk.is_file(), "le zip est gardé");
+        assert_eq!(f.calls.lock().unwrap().len(), 1);
+
+        // 2e usage : relu et rehashé, aucun téléchargement.
+        let got = load_openssh_zip(&root, &asset, "http://127.0.0.1:1", &f, &mut |_| {}).unwrap();
+        assert_eq!(got, zip);
+        assert_eq!(f.calls.lock().unwrap().len(), 1);
+
+        // Le fichier est altéré sur le portable : il n'est PAS cru sur parole.
+        fs::write(&on_disk, b"PK\x03\x04 piege").unwrap();
+        let mut said = Vec::new();
+        let got = load_openssh_zip(&root, &asset, "http://127.0.0.1:1", &f, &mut |m| {
+            said.push(m.to_string())
+        })
+        .unwrap();
+        assert_eq!(got, zip, "on rend les octets VÉRIFIÉS, pas ceux du disque");
+        assert_eq!(f.calls.lock().unwrap().len(), 2, "retéléchargé");
+        assert!(said.iter().any(|m| m.contains("remplacée")), "{said:?}");
+        assert_eq!(fs::read(&on_disk).unwrap(), zip);
+    }
+
+    #[test]
+    fn a_download_that_does_not_match_the_pin_is_refused_and_leaves_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let root = root_in(&t);
+        let asset = test_asset(&good_zip());
+        let mut f = FakeFetch::default();
+        f.files.insert(
+            asset.url("http://127.0.0.1:1"),
+            make_zip(&[("OpenSSH-Win64/sshd.exe", b"piege")]),
+        );
+        let e = load_openssh_zip(&root, &asset, "http://127.0.0.1:1", &f, &mut |_| {}).unwrap_err();
         assert!(e.to_string().contains("REFUSÉ"), "{e}");
         assert!(!root
             .path()
-            .join("tools/openssh")
-            .join(OPENSSH_WIN_VERSION)
-            .join("OpenSSH-Win64")
+            .join("tools/openssh/v1/OpenSSH-Win64.zip")
             .exists());
-        // Le répertoire de substitution (tests) court-circuite le téléchargement.
-        let o = ensure_openssh(
-            &root,
-            Some(Path::new("/x")),
-            "http://127.0.0.1:1",
-            &f,
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(o.sshd, Path::new("/x").join(exe("sshd")));
+    }
+
+    #[test]
+    fn real_pin_rejects_a_forged_openssh_zip() {
+        let t = tempfile::tempdir().unwrap();
+        let root = root_in(&t);
+        let mut f = FakeFetch::default();
+        f.files
+            .insert(OPENSSH_WIN.url("http://127.0.0.1:1"), good_zip());
+        let e = load_openssh_zip(&root, &OPENSSH_WIN, "http://127.0.0.1:1", &f, &mut |_| {})
+            .unwrap_err();
+        assert!(e.to_string().contains("REFUSÉ"), "{e}");
+    }
+
+    #[test]
+    fn a_previously_extracted_folder_on_the_portable_is_never_trusted() {
+        let t = tempfile::tempdir().unwrap();
+        let root = root_in(&t);
+        let zip = good_zip();
+        let asset = test_asset(&zip);
+        // Ancienne disposition : dossier extrait + marqueur, avec un sshd.exe PIÉGÉ.
+        let top = root.path().join("tools/openssh/v1");
+        fs::create_dir_all(top.join("OpenSSH-Win64")).unwrap();
+        fs::write(top.join("OpenSSH-Win64").join(exe("sshd")), b"PIEGE").unwrap();
+        fs::write(top.join("OpenSSH-Win64").join(exe("ssh-keygen")), b"PIEGE").unwrap();
+        fs::write(top.join("INSTALLED"), "v1 sha\n").unwrap();
+        let mut f = FakeFetch::default();
+        f.files.insert(asset.url("http://127.0.0.1:1"), zip.clone());
+
+        let bytes = load_openssh_zip(&root, &asset, "http://127.0.0.1:1", &f, &mut |_| {}).unwrap();
+        assert!(
+            !top.join("OpenSSH-Win64").exists(),
+            "dossier persistant retiré"
+        );
+        assert!(!top.join("INSTALLED").exists());
+
+        let work = tempfile::tempdir().unwrap();
+        let o = extract_openssh(&bytes, work.path()).unwrap();
+        assert_eq!(fs::read(&o.sshd).unwrap(), b"sshd-verifie");
+        assert_eq!(fs::read(&o.keygen).unwrap(), b"keygen-verifie");
+        assert!(
+            o.sshd.starts_with(work.path()),
+            "extrait dans le dossier privé"
+        );
+    }
+
+    #[test]
+    fn each_session_extracts_into_its_own_fresh_private_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let zip = good_zip();
+        let a = PrivateDir::create(t.path(), STAGING_PREFIX).unwrap();
+        let b = PrivateDir::create(t.path(), STAGING_PREFIX).unwrap();
+        assert_ne!(a.path, b.path);
+        assert!(a
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("ccp-share-"));
+        let oa = extract_openssh(&zip, &a.path).unwrap();
+        let ob = extract_openssh(&zip, &b.path).unwrap();
+        assert_ne!(oa.sshd, ob.sshd);
+        // Une archive sans les deux outils est refusée.
+        let c = PrivateDir::create(t.path(), STAGING_PREFIX).unwrap();
+        let bad = make_zip(&[(&format!("OpenSSH-Win64/{}", exe("sshd")), b"s")]);
+        assert!(extract_openssh(&bad, &c.path).is_err());
+        a.finish().unwrap();
+        assert!(!oa.sshd.exists(), "tout part avec le dossier de travail");
     }
 }

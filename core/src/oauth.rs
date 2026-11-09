@@ -6,7 +6,11 @@
 //! 1. try-lock du verrou de session (jamais pendant une session `run`) ;
 //! 2. relecture du magasin APRÈS le verrou (un autre processus a pu renouveler) ;
 //! 3. journal write-ahead `.ccp-pending` (nouveaux jetons, 600) écrit AVANT le
-//!    magasin, rejoué au démarrage de toute commande, puis effacé ;
+//!    magasin, rejoué au démarrage de toute commande, puis effacé. Sa place est
+//!    RÉSERVÉE (créée et fsync-ée) AVANT le POST : si le volume refuse l'écriture
+//!    (plein, lecture seule), on n'appelle pas le serveur, donc le refresh token
+//!    n'est pas dépensé. Si le journal échoue quand même après la réponse, on
+//!    tente malgré tout d'écrire le magasin avant de rendre l'erreur ;
 //! 4. relecture juste avant écriture + écriture dans le MÊME magasin, clés
 //!    inconnues préservées ;
 //! 5. après un refus définitif (400/401), marqueur `.ccp-revoked` : plus aucune
@@ -15,7 +19,7 @@
 //! Seuls les profils du portable sont renouvelés : `discover` ne passe jamais ici.
 
 use crate::api::{Api, RefreshResult};
-use crate::atomic::write_atomic;
+use crate::atomic::{write_atomic, Reserved, RESERVE_BYTES};
 use crate::creds::{read_login, write_login, CredBlob, Loaded};
 use crate::env::{now_ms, Env};
 use crate::lock::{self, Acquire, RenewingMark, SessionGuard};
@@ -253,6 +257,17 @@ pub fn renew(
         return Renewal::Revoked;
     };
 
+    // 4bis. Place du journal, AVANT de dépenser le refresh token : le serveur le
+    // tue dès qu'il répond 200, sans retour possible.
+    let reservation = match Reserved::create(&p.pending_reserve(), RESERVE_BYTES) {
+        Ok(r) => r,
+        Err(e) => {
+            return Renewal::Failed(format!(
+                "journal de renouvellement impossible à réserver ({e}) : serveur NON appelé, jeton conservé"
+            ))
+        }
+    };
+
     // 5. Appel au serveur.
     match api.refresh(&refresh) {
         RefreshResult::Renewed {
@@ -275,19 +290,29 @@ pub fn renew(
             let wrote = serde_json::to_string(&journal)
                 .map_err(|e| e.to_string())
                 .and_then(|s| {
-                    write_atomic(&p.pending_journal(), s.as_bytes()).map_err(|e| e.to_string())
+                    reservation
+                        .commit(s.as_bytes(), &p.pending_journal())
+                        .map_err(|e| e.to_string())
                 });
-            if let Err(e) = wrote {
-                return Renewal::Failed(format!("journal de renouvellement impossible : {e}"));
-            }
+            // Le journal a échoué MALGRÉ la réservation (disque retiré, erreur
+            // d'E/S…) : les nouveaux jetons n'existent plus qu'en mémoire. On ne
+            // rend PAS la main tout de suite : le magasin est leur dernière chance.
+            let journal_err = wrote.err();
             fault_point("CCP_FAULT_AFTER_JOURNAL");
             // 4. Relecture juste avant écriture.
-            let latest = match read_login(env, p) {
-                Ok(Some(l)) => l,
+            let latest_owned;
+            let latest: &Loaded = match read_login(env, p) {
+                Ok(Some(l)) => {
+                    latest_owned = l;
+                    &latest_owned
+                }
                 Ok(None) => {
                     let _ = std::fs::remove_file(p.pending_journal());
                     return Renewal::Failed("le login a disparu pendant le renouvellement".into());
                 }
+                // Journal absent ET relecture impossible : on écrit à partir du login
+                // lu sous verrou il y a un instant plutôt que de perdre les jetons.
+                Err(_) if journal_err.is_some() => &cur,
                 Err(e) => return Renewal::Failed(format!("{e} (jetons gardés dans .ccp-pending)")),
             };
             if latest.blob.fingerprint() != fp {
@@ -301,12 +326,15 @@ pub fn renew(
                 new_refresh.as_ref().map(|r| r.expose_secret()),
                 expires_at,
             );
-            match write_login(env, p, &latest, &nb) {
-                Ok(()) => {
+            match (write_login(env, p, latest, &nb), journal_err) {
+                (Ok(()), _) => {
                     let _ = std::fs::remove_file(p.pending_journal());
                     Renewal::Renewed
                 }
-                Err(e) => Renewal::Failed(format!("{e} (jetons gardés dans .ccp-pending)")),
+                (Err(e), None) => Renewal::Failed(format!("{e} (jetons gardés dans .ccp-pending)")),
+                (Err(e), Some(je)) => Renewal::Failed(format!(
+                    "{e} ET journal impossible ({je}) : les nouveaux jetons sont PERDUS, il faut reconnecter ce compte"
+                )),
             }
         }
         RefreshResult::Revoked(_) => {
@@ -410,6 +438,7 @@ mod tests {
         assert_eq!(v["mcpOAuth"]["s"]["accessToken"], "M");
         assert!(v["claudeAiOauth"]["expiresAt"].as_i64().unwrap() > now_ms());
         assert!(!f.p.pending_journal().exists());
+        assert!(!f.p.pending_reserve().exists(), "réservation oubliée");
         assert!(!f.p.renewing_marker().exists());
     }
 
@@ -626,5 +655,135 @@ mod tests {
         assert!(expired(&b, 100_000));
         assert!(expired(&b, 40_001));
         assert!(!expired(&b, 39_000));
+    }
+
+    /// Faux transport qui exécute un effet de bord juste avant de répondre : pour
+    /// simuler « le volume tombe entre la réservation et la fin du POST ».
+    struct Hook {
+        before_reply: Box<dyn Fn() + Send + Sync>,
+        reply: String,
+        calls: Mutex<usize>,
+    }
+
+    impl Http for Hook {
+        fn send(&self, _req: &HttpRequest) -> Result<HttpResponse, NetError> {
+            *self.calls.lock().unwrap() += 1;
+            (self.before_reply)();
+            Ok(HttpResponse {
+                status: 200,
+                body: self.reply.clone(),
+            })
+        }
+    }
+
+    const NEW_TOKENS: &str = r#"{"access_token":"AT2","refresh_token":"RT2","expires_in":3600}"#;
+
+    #[test]
+    fn no_request_is_sent_when_the_journal_cannot_be_reserved_first() {
+        let f = fx(EXPIRED);
+        // Un répertoire occupe la place du journal : le volume « refuse » l'écriture.
+        std::fs::create_dir(f.p.pending_reserve()).unwrap();
+        let h = Scripted::new(vec![ok(200, NEW_TOKENS)]);
+        let r = renew(
+            &f.env,
+            &api(h.clone()),
+            &f.p,
+            &load(&f),
+            Trigger::Expired,
+            &AtomicUsize::new(0),
+        );
+        match r {
+            Renewal::Failed(m) => assert!(m.contains("NON appelé"), "{m}"),
+            autre => panic!("échec attendu, obtenu {autre:?}"),
+        }
+        assert!(
+            h.seen.lock().unwrap().is_empty(),
+            "le refresh token n'a pas à être dépensé"
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.p.credentials_file()).unwrap(),
+            EXPIRED,
+            "magasin intact"
+        );
+    }
+
+    #[test]
+    fn a_journal_that_fails_after_the_post_still_gets_the_store_written() {
+        let f = fx(EXPIRED);
+        // Le journal ne pourra pas prendre sa place définitive (répertoire plein).
+        std::fs::create_dir(f.p.pending_journal()).unwrap();
+        std::fs::write(f.p.pending_journal().join("x"), "x").unwrap();
+        let h = Scripted::new(vec![ok(200, NEW_TOKENS)]);
+        let r = renew(
+            &f.env,
+            &api(h),
+            &f.p,
+            &load(&f),
+            Trigger::Expired,
+            &AtomicUsize::new(0),
+        );
+        assert_eq!(r, Renewal::Renewed, "le magasin est la dernière chance");
+        let l = load(&f);
+        assert_eq!(l.blob.refresh_token().unwrap().expose_secret(), "RT2");
+        assert_eq!(l.blob.access_token().unwrap().expose_secret(), "AT2");
+        assert!(!f.p.pending_reserve().exists());
+    }
+
+    #[test]
+    fn losing_both_the_journal_and_the_store_is_said_plainly() {
+        let f = fx(EXPIRED);
+        std::fs::create_dir(f.p.pending_journal()).unwrap();
+        std::fs::write(f.p.pending_journal().join("x"), "x").unwrap();
+        let cred = f.p.credentials_file();
+        let h = Arc::new(Hook {
+            // Le magasin devient inscriptible-impossible pendant le POST.
+            before_reply: Box::new(move || {
+                std::fs::remove_file(&cred).unwrap();
+                std::fs::create_dir(&cred).unwrap();
+            }),
+            reply: NEW_TOKENS.into(),
+            calls: Mutex::new(0),
+        });
+        let r = renew(
+            &f.env,
+            &Api::new(h.clone(), "http://x", "http://x/token"),
+            &f.p,
+            &load(&f),
+            Trigger::Expired,
+            &AtomicUsize::new(0),
+        );
+        match r {
+            Renewal::Failed(m) => {
+                assert!(m.contains("PERDUS") && m.contains("journal"), "{m}")
+            }
+            autre => panic!("échec attendu, obtenu {autre:?}"),
+        }
+        assert_eq!(*h.calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_renewal_made_obsolete_during_the_post_leaves_no_journal_nor_reservation() {
+        let f = fx(EXPIRED);
+        let cred = f.p.credentials_file();
+        let h = Arc::new(Hook {
+            // Le magasin change de lignée pendant le POST : le renouvellement est
+            // obsolète, mais le journal a déjà été écrit puis retiré proprement.
+            before_reply: Box::new(move || {
+                std::fs::write(&cred, EXPIRED.replace("RT1", "RT9")).unwrap();
+            }),
+            reply: NEW_TOKENS.into(),
+            calls: Mutex::new(0),
+        });
+        let r = renew(
+            &f.env,
+            &Api::new(h, "http://x", "http://x/token"),
+            &f.p,
+            &load(&f),
+            Trigger::Expired,
+            &AtomicUsize::new(0),
+        );
+        assert_eq!(r, Renewal::AlreadyFresh);
+        assert!(!f.p.pending_journal().exists());
+        assert!(!f.p.pending_reserve().exists());
     }
 }

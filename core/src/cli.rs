@@ -331,11 +331,38 @@ fn cmd_email(root: &Root, profile: &str) -> Result<i32> {
 fn cmd_purge(env: &Env, root: &Root, profile: Option<&str>) -> Result<i32> {
     let only = profile.map(parse_profile).transpose()?;
     let r = purge::purge(env, root, only.as_ref())?;
-    out(&format!(
+    // 1re ligne = contrat historique ; les suivantes (stdout) sont le rapport.
+    let mut text = format!(
         "Trousseau : {} session(s) retirée(s) pour {} profil(s).\n",
         r.removed, r.profiles
-    ))?;
-    Ok(0)
+    );
+    for p in &r.session_open {
+        text.push_str(&format!(
+            "Attention : « {p} » est ouvert dans une session Claude ; ses identifiants sont retirés quand même, mais cette session peut les réécrire en se fermant.\n"
+        ));
+    }
+    for p in &r.renewal_running {
+        text.push_str(&format!(
+            "Attention : un renouvellement de « {p} » tournait encore après 15 s ; identifiants retirés quand même, à revérifier.\n"
+        ));
+    }
+    for (p, why) in &r.unlocked {
+        text.push_str(&format!(
+            "Attention : « {p} » purgé sans verrou ({why}) ; un renouvellement simultané pourrait réécrire des identifiants.\n"
+        ));
+    }
+    for f in &r.failures {
+        text.push_str(&format!("ÉCHEC : {f}\n"));
+    }
+    out(&text)?;
+    if r.complete() {
+        Ok(0)
+    } else {
+        Err(CcpError::Internal(format!(
+            "purge INCOMPLÈTE : {} élément(s) n'ont pas pu être effacés, des identifiants peuvent subsister (détail ci-dessus)",
+            r.failures.len()
+        )))
+    }
 }
 
 fn cmd_run(env: &Env, root: &Root, profile: &str, args: Vec<OsString>) -> Result<i32> {

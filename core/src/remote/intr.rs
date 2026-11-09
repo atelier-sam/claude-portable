@@ -107,9 +107,41 @@ impl Job {
 }
 
 #[cfg(windows)]
+impl Job {
+    /// Tue TOUS les processus du Job puis ferme la poignée, en rendant les échecs.
+    ///
+    /// WHY : sshd (Win32-OpenSSH) lance un processus FILS par connexion que ni
+    /// `Child::kill` ni notre `Child` ne voient ; seul le Job les atteint. Il faut
+    /// qu'ils soient morts AVANT d'effacer le dossier de travail d'où ils tournent,
+    /// et savoir si ça a échoué plutôt que de l'ignorer dans un `Drop` muet.
+    pub fn terminate_and_close(self) -> std::result::Result<(), String> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        let h = self.0;
+        // Fermeture assurée ici : `Drop` ne doit pas refermer la même poignée.
+        std::mem::forget(self);
+        // SAFETY : poignée valide créée par `new_kill_on_close`, utilisée puis fermée une fois.
+        unsafe {
+            let killed = TerminateJobObject(h, 1) != 0;
+            let kill_err = std::io::Error::last_os_error();
+            let closed = CloseHandle(h) != 0;
+            if !killed {
+                return Err(format!("arrêt des processus du Job refusé : {kill_err}"));
+            }
+            if !closed {
+                return Err("poignée du Job non refermée".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
 impl Drop for Job {
     fn drop(&mut self) {
-        // Fermer la dernière poignée tue les processus du Job (kill-on-close).
+        // Fermer la dernière poignée tue les processus du Job (kill-on-close). Un
+        // `Drop` ne peut pas rendre d'erreur : le chemin normal passe par
+        // `terminate_and_close`, qui, lui, les remonte.
         // SAFETY : poignée créée par `new_kill_on_close`, refermée une seule fois.
         unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
     }
@@ -125,6 +157,10 @@ impl Job {
         Ok(Job)
     }
     pub fn assign(&self, _child: &std::process::Child) -> crate::error::Result<()> {
+        Ok(())
+    }
+    /// Hors Windows, pas de Job : les `Child` tués un par un suffisent.
+    pub fn terminate_and_close(self) -> std::result::Result<(), String> {
         Ok(())
     }
 }

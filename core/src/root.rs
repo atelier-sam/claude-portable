@@ -112,6 +112,11 @@ impl ProfileDir {
     pub fn token_file(&self) -> PathBuf {
         self.dir.join("oauth.token")
     }
+    /// Sauvegarde laissée par le wizard (`mv oauth.token oauth.token.bak`) pendant
+    /// un remplacement : elle contient le MÊME secret que `oauth.token`.
+    pub fn token_backup(&self) -> PathBuf {
+        self.dir.join("oauth.token.bak")
+    }
     pub fn plan_file(&self) -> PathBuf {
         self.dir.join("plan")
     }
@@ -129,6 +134,10 @@ impl ProfileDir {
     }
     pub fn pending_journal(&self) -> PathBuf {
         self.dir.join(".ccp-pending")
+    }
+    /// Place réservée AVANT le POST pour y écrire le journal (voir `atomic::Reserved`).
+    pub fn pending_reserve(&self) -> PathBuf {
+        self.dir.join(".ccp-pending.reserve")
     }
     pub fn revoked_marker(&self) -> PathBuf {
         self.dir.join(".ccp-revoked")

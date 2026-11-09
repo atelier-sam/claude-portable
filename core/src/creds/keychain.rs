@@ -205,9 +205,17 @@ mod mac {
         }
         let line = build_add_line(acct, svc, payload, env.keychain.as_deref());
         let out = if needs_argv(&line) {
-            // Comme Claude au-delà de la limite de `security -i`. Le jeton est
-            // alors visible quelques ms dans `ps` : seulement pour les gros
-            // coffres (mcpOAuth volumineux), jamais pour un login seul.
+            // RISQUE ACCEPTÉ (coordinateur, revue terminale 09/11/2026) : au-delà
+            // de la limite de `security -i` (~4 000 caractères), le secret passe
+            // en argv (`-X <hex>`), donc visible quelques ms dans `ps` pour les
+            // processus du même utilisateur. WHY on ne passe pas par une API
+            // native (SecItemAdd/Update) : Claude Code fait EXACTEMENT ce repli
+            // (même commande, même item), et une API native recréerait l'item
+            // avec une autre ACL (application créatrice différente de `security`)
+            // — Claude, qui relit l'item via `security`, risquerait alors de
+            // déclencher des invites d'autorisation du Trousseau. Un login seul
+            // (~500 caractères) ne passe JAMAIS ici : seuls les gros coffres
+            // (mcpOAuth volumineux) y arrivent. Ne pas « corriger » sans accord.
             let mut args: Vec<String> = ["add-generic-password", "-U", "-a", acct, "-s", svc, "-X"]
                 .iter()
                 .map(|s| s.to_string())

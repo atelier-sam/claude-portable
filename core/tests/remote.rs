@@ -931,8 +931,15 @@ fn share_full_session_registers_the_pc_then_cleans_everything_on_ctrl_c() {
     assert!(a.contains(&"ExitOnForwardFailure=yes".to_string()));
     assert!(a.contains(&"-T".to_string()));
     assert!(a.last().unwrap().ends_with(" ccp-share 'PC-TEST'"));
-    // Le dossier de travail existe tant que le partage vit.
+    // Le dossier de travail existe tant que le partage vit, PRIVÉ (ACL explicite).
     assert_eq!(rig.staging_left().len(), 1);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let d = rig.sb.tmp().join(&rig.staging_left()[0]);
+        let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "dossier de travail lisible par d'autres");
+        assert!(d.join("hostkey").exists() && d.join(".ccp-lock").exists());
+    }
     let sshd_pid: i32 = std::fs::read_to_string(rig.sb.p("seen/sshd.pid"))
         .unwrap()
         .trim()
@@ -1047,4 +1054,139 @@ fn share_with_a_dying_sshd_reports_it_and_cleans_up() {
     assert_eq!(code, 10, "{err}");
     assert!(err.contains("sshd s'est arrêté"), "{err}");
     assert!(rig.staging_left().is_empty());
+}
+
+#[test]
+fn share_sweeps_orphan_staging_of_a_killed_session_but_leaves_a_live_one_alone() {
+    let rig = ShareRig::new(None);
+    let tmp = rig.sb.tmp();
+    // Orphelin : un partage précédent tué net a laissé sa clé d'hôte (verrou libre).
+    let orphan = tmp.join("ccp-share-mort-1-0");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join(".ccp-lock"), "").unwrap();
+    std::fs::write(orphan.join("hostkey"), "CLE-PRIVEE-OUBLIEE").unwrap();
+    // Vivant : un autre partage, dans une autre fenêtre, tient son verrou.
+    let live = tmp.join("ccp-share-vivant-2-0");
+    std::fs::create_dir_all(&live).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(live.join(".ccp-lock"))
+        .unwrap();
+    held.try_lock().expect("verrou de test");
+
+    let mut child = rig.spawn("OUI\n");
+    let client = rig.sb.p("seen/client.json");
+    wait_for("enregistrement du PC", 30, || client.exists());
+    assert!(!orphan.exists(), "l'orphelin doit être effacé au démarrage");
+    assert!(live.exists(), "un partage vivant n'est jamais touché");
+    let _ = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status();
+    let o = finish_child(&mut child, 30);
+    let (_, err, code) = s(&o);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("1 dossier(s) de travail orphelin(s)"), "{err}");
+    assert!(rig.journal().contains("orphelin"), "{}", rig.journal());
+    assert!(live.exists());
+    drop(held);
+}
+
+/// `finish` consomme l'enfant ; ici on a besoin de le garder pour `kill`.
+fn finish_child(child: &mut Child, secs: u64) -> Output {
+    let end = Instant::now() + Duration::from_secs(secs);
+    while child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < end, "ccp-core ne s'est pas arrêté");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut out = Output {
+        status: child.wait().unwrap(),
+        stdout: vec![],
+        stderr: vec![],
+    };
+    use std::io::Read;
+    if let Some(mut so) = child.stdout.take() {
+        let _ = so.read_to_end(&mut out.stdout);
+    }
+    if let Some(mut se) = child.stderr.take() {
+        let _ = se.read_to_end(&mut out.stderr);
+    }
+    out
+}
+
+#[test]
+fn share_never_claims_everything_was_removed_when_the_cleanup_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    // Root contourne les droits : le scénario n'aurait aucun sens.
+    if Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let rig = ShareRig::new(None);
+    let seen = rig.sb.p("seen");
+    // Le faux sshd laisse dans le dossier de travail un sous-dossier non effaçable.
+    rig.sb.script(
+        "openssh/sshd",
+        &format!(
+            r#"while [ $# -gt 0 ]; do if [ "$1" = "-f" ]; then c="$2"; fi; shift; done
+d="$(dirname "$c")"
+mkdir "$d/verrouille" && echo x > "$d/verrouille/x" && chmod 500 "$d/verrouille"
+echo "$d" > "{seen}/staging.path"
+echo "Server listening on 127.0.0.1 port 54022." >&2
+exec sleep 120"#,
+            seen = seen.display()
+        ),
+    );
+    let mut child = rig.spawn("OUI\n");
+    let client = rig.sb.p("seen/client.json");
+    wait_for("enregistrement du PC", 30, || client.exists());
+    let _ = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status();
+    let o = finish_child(&mut child, 30);
+    let (_, err, code) = s(&o);
+    let staging = PathBuf::from(
+        std::fs::read_to_string(seen.join("staging.path"))
+            .unwrap()
+            .trim(),
+    );
+
+    assert_eq!(
+        code, 10,
+        "un nettoyage incomplet n'est pas un succès : {err}"
+    );
+    assert!(
+        !err.contains("tout a été retiré"),
+        "faux message de succès : {err}"
+    );
+    assert!(err.contains("TOUT N'A PAS ÉTÉ RETIRÉ"), "{err}");
+    assert!(err.contains("dossier de travail non effacé"), "{err}");
+    assert!(staging.exists(), "le dossier est bien resté");
+    assert!(
+        rig.journal().contains("nettoyage INCOMPLET"),
+        "{}",
+        rig.journal()
+    );
+
+    // Le reste est repris au prochain partage : droits rétablis, il est balayé.
+    std::fs::set_permissions(
+        staging.join("verrouille"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let mut child = rig.spawn("OUI\n");
+    wait_for("enregistrement du PC (2e)", 30, || client.exists());
+    assert!(!staging.exists(), "orphelin balayé au démarrage suivant");
+    let _ = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status();
+    let o = finish_child(&mut child, 30);
+    let (_, err, _) = s(&o);
+    assert!(err.contains("1 dossier(s) de travail orphelin(s)"), "{err}");
 }

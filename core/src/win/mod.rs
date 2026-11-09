@@ -334,11 +334,7 @@ fn cmd_office(env: &Env, root: &Root, a: OfficeArgs) -> Result<i32> {
         std::env::var("PROCESSOR_ARCHITECTURE").ok().as_deref(),
         std::env::var("PROCESSOR_ARCHITEW6432").ok().as_deref(),
     );
-    let host = office::RealHost {
-        env,
-        root,
-        winget: &real,
-    };
+    let host = office::RealHost { env, winget: &real };
     let result = office::install(&host, edition, &a.lang, &apps, bits);
     let mut sink = Sink::new(a.result_file.as_deref())?;
     sink.emit(&result.line())?;
