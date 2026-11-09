@@ -387,6 +387,7 @@ ask_host_trust() {
 
 quit_wizard() {
   clear 2>/dev/null || true
+  trap - EXIT HUP TERM
   if [ "$(host_trust)" = guest ]; then
     local prc=0; cc_purge_sessions || prc=$?
     if [ "$prc" = 2 ]; then
@@ -421,6 +422,30 @@ clear 2>/dev/null || true
 cc_ensure_binary
 cc_ensure_core 2>/dev/null || cc_log "mode dégradé : ccp-core indisponible"
 ask_host_trust
+# Poste invité : fermer la fenêtre (croix, SIGHUP) ou tuer le wizard (SIGTERM)
+# doit effacer les connexions comme « Quitter ». quit_wizard désarme ce piège et
+# fait sa propre purge, qui affiche le résultat. Les sous-shells ( ) et $( ) ne
+# reçoivent pas ces pièges (bash les réinitialise).
+guest_purge_on_close() {
+  trap - EXIT HUP TERM
+  cc_purge_sessions >/dev/null 2>&1 || true
+}
+# Filet pour ce que les pièges ne voient pas (SIGKILL, fenêtre tuée par
+# l'OS) : un guetteur détaché, sourd à SIGHUP, efface dès que le wizard n'existe
+# plus. Après « Quitter », le wizard devient le shell (exec, même pid) : le
+# guetteur efface alors à la fermeture de ce shell — sans effet si déjà vide.
+guest_watchdog() {
+  local wpid=$$
+  ( trap '' HUP INT TERM
+    while kill -0 "$wpid" 2>/dev/null; do sleep 2; done
+    cc_purge_sessions ) </dev/null >/dev/null 2>&1 &
+}
+if [ "$(host_trust)" = guest ]; then
+  trap guest_purge_on_close EXIT
+  trap 'guest_purge_on_close; exit 129' HUP
+  trap 'guest_purge_on_close; exit 143' TERM
+  guest_watchdog
+fi
 probe_all
 
 # ---------- boucle ----------
