@@ -1,0 +1,48 @@
+[package]
+name = "ccp-core"
+version = "0.1.0"
+edition = "2021"
+# File::try_lock (flock / LockFileEx) est stable depuis Rust 1.89 : on évite une
+# dépendance (fs4) pour le verrou de session.
+rust-version = "1.89"
+description = "Noyau comptes de Claude Code Portable : statut, renouvellement, Trousseau, lancement"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "ccp_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ccp-core"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Client HTTP bloquant : 3 à 6 requêtes par lancement, un runtime async serait
+# du poids mort. TLS rustls (provider ring : se compile avec zig cc) + racines
+# du SYSTÈME (platform-verifier) pour passer les proxys d'entreprise des PC clients.
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+sha2 = "0.10"
+unicode-normalization = "0.1"
+secrecy = "0.10"
+jiff = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[dev-dependencies]
+tiny_http = "0.12"
+tempfile = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
