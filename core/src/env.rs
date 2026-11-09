@@ -21,6 +21,22 @@ pub struct Env {
     pub user: String,
     /// Chemin du binaire claude donné par `--claude` ou `$CCP_CLAUDE_BIN`.
     pub claude: Option<String>,
+    /// Surcharges des outils de la liaison Windows / distante (tests, installations atypiques).
+    pub ovr: Overrides,
+}
+
+/// Surcharges `CCP_*` des commandes `win` et `remote`. En production elles sont vides.
+///
+/// Aucune ne porte de secret. Celles qui visent le réseau n'acceptent que le
+/// bouclage HTTP, comme `CCP_TOKEN_URL`.
+#[derive(Clone, Debug, Default)]
+pub struct Overrides {
+    /// `CCP_FAKE_WINDOWS=1` : joue les commandes `win` hors de Windows (faux winget).
+    pub fake_windows: bool,
+    /// `CCP_WINGET_BIN` : binaire winget à la place de celui du PATH.
+    pub winget: Option<String>,
+    /// `CCP_ODT_SETUP` : `setup.exe` de l'Office Deployment Tool déjà présent.
+    pub odt_setup: Option<String>,
 }
 
 pub fn now_ms() -> i64 {
@@ -101,6 +117,11 @@ impl Env {
             claude: claude_flag
                 .map(|s| fix(s.to_string()))
                 .or_else(|| nonempty("CCP_CLAUDE_BIN").map(fix)),
+            ovr: Overrides {
+                fake_windows: nonempty("CCP_FAKE_WINDOWS").is_some_and(|v| v == "1"),
+                winget: nonempty("CCP_WINGET_BIN"),
+                odt_setup: nonempty("CCP_ODT_SETUP"),
+            },
         }
     }
 }
@@ -131,6 +152,7 @@ impl Env {
             home,
             user: "testeur".into(),
             claude: None,
+            ovr: Overrides::default(),
         }
     }
 }

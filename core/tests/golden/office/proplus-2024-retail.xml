@@ -1,0 +1,15 @@
+<Configuration>
+  <Add OfficeClientEdition="64" Channel="Current">
+    <Product ID="ProPlus2024Retail">
+      <Language ID="fr-fr" />
+      <ExcludeApp ID="Access" />
+      <ExcludeApp ID="Publisher" />
+      <ExcludeApp ID="Teams" />
+      <ExcludeApp ID="OneDrive" />
+      <ExcludeApp ID="Groove" />
+    </Product>
+  </Add>
+  <Property Name="AUTOACTIVATE" Value="0" />
+  <Property Name="PinIconsToTaskbar" Value="FALSE" />
+  <Display Level="None" AcceptEULA="TRUE" />
+</Configuration>

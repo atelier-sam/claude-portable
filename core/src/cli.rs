@@ -91,6 +91,11 @@ pub enum Cmd {
         /// Un seul profil (sinon tous).
         profile: Option<String>,
     },
+    /// Logiciels Windows : catalogue, installation par winget, Office par ODT (Windows seulement).
+    Win {
+        #[command(subcommand)]
+        action: crate::win::WinCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -141,7 +146,7 @@ pub struct DiscoverArgs {
 }
 
 /// stdout sans panique si le lecteur ferme le tube (`| head -1`).
-fn out(s: &str) -> Result<()> {
+pub(crate) fn out(s: &str) -> Result<()> {
     let mut so = std::io::stdout().lock();
     match so.write_all(s.as_bytes()).and_then(|()| so.flush()) {
         Ok(()) => Ok(()),
@@ -371,6 +376,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         },
         Cmd::Run { profile, args } => cmd_run(&env, &root, &profile, args),
         Cmd::Doctor { profile } => cmd_doctor(&env, &root, profile.as_deref()),
+        Cmd::Win { action } => crate::win::run(&env, &root, action),
     }
 }
 

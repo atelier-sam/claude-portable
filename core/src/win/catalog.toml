@@ -1,0 +1,151 @@
+# Catalogue des logiciels Windows proposés par le wizard (`ccp-core win catalog`).
+#
+# Chaque identifiant `winget` a été vérifié le 09/11/2026 contre le dépôt officiel
+# microsoft/winget-pkgs (chemin manifests/<lettre>/<Éditeur>/<Paquet>/…). Écarté :
+#   - RustDesk.RustDesk : absent du dépôt (aucun dossier manifests/r/RustDesk) ;
+#   - KeePassXC.KeePassXC : absent ; le paquet existe sous KeePassXCTeam.KeePassXC.
+# Volontairement absent : CCleaner (version gratuite interdite par Sam).
+#
+# Surcharge : `<racine>/config/catalog.toml`, même format, fusion PAR CLÉ champ par
+# champ (`remove = true` retire une entrée ; une clé nouvelle doit avoir label + winget).
+# Les libellés ne contiennent ni virgule (gum --selected sépare par virgule) ni tabulation.
+
+[[app]]
+key = "chrome"
+label = "Google Chrome"
+category = "Navigateurs"
+winget = "Google.Chrome"
+default = true
+
+[[app]]
+key = "firefox"
+label = "Mozilla Firefox"
+category = "Navigateurs"
+winget = "Mozilla.Firefox"
+default = false
+
+[[app]]
+key = "libreoffice"
+label = "LibreOffice (suite bureautique gratuite)"
+category = "Bureautique"
+winget = "TheDocumentFoundation.LibreOffice"
+default = true
+
+[[app]]
+key = "thunderbird"
+label = "Mozilla Thunderbird (messagerie)"
+category = "Bureautique"
+winget = "Mozilla.Thunderbird"
+default = false
+
+[[app]]
+key = "acrobat-reader"
+label = "Adobe Acrobat Reader (PDF)"
+category = "Bureautique"
+winget = "Adobe.Acrobat.Reader.64-bit"
+default = true
+
+[[app]]
+key = "notepadpp"
+label = "Notepad++"
+category = "Bureautique"
+winget = "Notepad++.Notepad++"
+default = false
+
+[[app]]
+key = "winrar"
+label = "WinRAR (archives, licence payante)"
+category = "Utilitaires"
+winget = "RARLab.WinRAR"
+default = false
+
+[[app]]
+key = "7zip"
+label = "7-Zip (archives gratuit)"
+category = "Utilitaires"
+winget = "7zip.7zip"
+default = true
+
+[[app]]
+key = "vlc"
+label = "VLC (lecteur multimédia)"
+category = "Multimédia"
+winget = "VideoLAN.VLC"
+default = true
+
+[[app]]
+key = "powertoys"
+label = "Microsoft PowerToys"
+category = "Utilitaires"
+winget = "Microsoft.PowerToys"
+default = false
+
+[[app]]
+key = "keepassxc"
+label = "KeePassXC (gestionnaire de mots de passe)"
+category = "Sécurité"
+winget = "KeePassXCTeam.KeePassXC"
+default = false
+
+[[app]]
+key = "malwarebytes"
+label = "Malwarebytes (anti-malware)"
+category = "Sécurité"
+winget = "Malwarebytes.Malwarebytes"
+default = false
+
+[[app]]
+key = "anydesk"
+label = "AnyDesk (prise en main à distance)"
+category = "Assistance à distance"
+winget = "AnyDesk.AnyDesk"
+default = false
+
+[[app]]
+key = "teamviewer"
+label = "TeamViewer (prise en main à distance)"
+category = "Assistance à distance"
+winget = "TeamViewer.TeamViewer"
+default = false
+
+[[app]]
+key = "zoom"
+label = "Zoom"
+category = "Communication"
+winget = "Zoom.Zoom"
+default = false
+
+[[app]]
+key = "teams"
+label = "Microsoft Teams"
+category = "Communication"
+winget = "Microsoft.Teams"
+default = false
+
+[[app]]
+key = "onedrive"
+label = "Microsoft OneDrive"
+category = "Communication"
+winget = "Microsoft.OneDrive"
+default = false
+
+[[app]]
+key = "java"
+label = "Java (environnement d'exécution Oracle)"
+category = "Composants"
+winget = "Oracle.JavaRuntimeEnvironment"
+default = false
+
+[[app]]
+key = "dotnet-desktop"
+label = ".NET Desktop Runtime 8"
+category = "Composants"
+winget = "Microsoft.DotNet.DesktopRuntime.8"
+default = false
+
+[[app]]
+key = "vcredist"
+label = "Visual C++ Redistributable 2015-2022 (x64)"
+category = "Composants"
+winget = "Microsoft.VCRedist.2015+.x64"
+default = true
